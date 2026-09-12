@@ -71,8 +71,8 @@ when one command must finish before the next begins. References to earlier batch
 are not supported; newly returned handles require a subsequent request.
 
 No rollback occurs. Each operation retains its existing retry semantics: `start_id`,
-`input_id`, and interrupt `operation_id` still matter. `request_id` is correlation, not
-durable deduplication. An accepted batch continues if its client disconnects while its
+`input_id`, and interrupt `operation_id` still matter. `request_id` is correlation in the local RPC transport. Negotiated gateway
+recovery also uses the outer ID for in-memory deduplication until acknowledgement. An accepted batch continues if its client disconnects while its
 host remains running. Lost responses can be recovered through observation/listing and
 appropriate per-operation retries. Daemon shutdown can interrupt unfinished batch work.
 
@@ -82,13 +82,15 @@ must still be considered before pausing it.
 
 ## Gateway transport contract
 
-`gateway::{HostMessage, GatewayMessage}` defines the initial version 1 handshake:
+`gateway::{HostMessage, GatewayMessage}` defines the version 1 handshake:
 
-1. The daemon connects to `wss://GATEWAY/BASE/v1/hosts/HOST_ID/connect`, authenticating
+1. The daemon connects to `wss://GATEWAY/BASE/v1/machines/MACHINE_ID/connect`, authenticating
    with an `Authorization: Bearer ...` header. It sends a `hello` containing protocol
-   version, stable installation ID, gateway-issued host ID, runtime info, and binary info.
+   version, stable installation ID, gateway-issued host ID, runtime info, binary info, and optional `request_recovery: true`.
+   The wire field `host_id` contains the machine ID for compatibility.
 2. The gateway sends `welcome` with `protocol_version`, a UUID `connection_id`, and
-   `heartbeat_interval_ms` (50–60,000; 15,000 is a reasonable normal value).
+   `heartbeat_interval_ms` (50–60,000; normally 15,000), and `request_recovery`
+   indicating whether it supports the advertised feature. Missing flags default to false.
 3. The gateway sends `{"type":"request","request":RPC_REQUEST}`. The host returns
    `{"type":"response","response":RPC_RESPONSE}`. Requests may complete out of order;
    correlate their request IDs. Each WebSocket text message contains one JSON envelope.
@@ -98,10 +100,33 @@ must still be considered before pausing it.
    `revoked`, `replaced`, and `incompatible_protocol` stop the daemon and require local
    attention; they do not cause an authentication retry loop.
 
-Each connection's responses belong to that connection. Reconnects preserve the runtime
-generation; daemon restarts do not. The gateway should supply `expected_generation_id`
-when reconnecting/retrying to avoid dispatching against a replacement runtime.
+With recovery negotiated, additional envelopes carry `request_id` and `generation_id`:
 
-The gateway controls authorization between callers and hosts. Device registration,
-credential issuance/rotation, and the final gateway deployment URL remain to be implemented
-with the gateway. The transport module can change independently of the execution API.
+| Direction | Type | Meaning |
+|---|---|---|
+| Host → gateway | `accepted` | Receipt recorded; operation or batch may still be running |
+| Gateway → host | `recover` | Query an existing receipt, without dispatching work |
+| Host → gateway | `missing` | No receipt in this runtime; outcome cannot be recovered |
+| Gateway → host | `acknowledge` | Job durably settled; release its retained response |
+
+The existing `response` envelope carries completed results. The daemon proactively resends
+unacknowledged results after reconnecting. The gateway persists the response and outbox event
+before acknowledging, and acknowledges duplicates without changing terminal results or
+creating another event. A terminal `unknown` job remains immutable if its response arrives
+later; acknowledging it releases the daemon's receipt.
+
+The daemon reserves response capacity before accepting work. Repeated unacknowledged IDs
+with the same normalized request recover their receipt; changed input is a protocol error.
+The gateway uses a unique job UUID, never reuses an acknowledged ID, and never automatically
+resends an operation. A receipt lookup does not observe the underlying command.
+
+Reconnects preserve runtime generation; daemon restarts do not. Every gateway dispatch pins
+`expected_generation_id`; recovery only queries the original generation. The daemon retains
+at most 128 receipts/256 MiB, reserving 8 MiB for each pending response, until acknowledged
+or the runtime exits. Peers without recovery negotiation use connection-scoped responses.
+
+`RegistrationRequest` and `RegistrationResponse` share the HTTP enrollment contract:
+`POST /v1/machines/:machineId/register`, with a registration token in the Authorization
+header and `{ "installationId": "UUID" }`, returns `{ "machineId": "UUID", "credential": "..." }`.
+User-to-machine authorization is enforced by the gateway. No gateway deployment URL is
+built into the daemon.

@@ -4,10 +4,9 @@ A foreground host daemon for Linux, macOS, and Windows. It runs as the local use
 account, embeds `process-execution-core`, and maintains an authenticated outbound
 WebSocket to an execution gateway. It opens no inbound network server.
 
-The built-in gateway URL is unset. A gateway-issued credential must be configured
-before `run` can connect. Registration and credential issuance will be implemented
-with the gateway; this version accepts a credential through stdin and is tested against
-a local mock gateway.
+The built-in gateway URL is unset. Register this installation with the execution
+gateway before running it. The gateway issues a machine credential, which the daemon
+stores privately and uses for subsequent connections.
 
 ## Install and configure
 
@@ -21,43 +20,46 @@ Alternatively, `cargo build --workspace --release --locked` creates the daemon i
 `target/release/`; append `.exe` on Windows. CI uploads release binaries for each OS.
 Windows requires Windows 10 version 1809+ or Windows Server 2019+.
 
-Configure a gateway-issued host ID and credential, then run:
+Create a machine with the gateway user API (`POST /v1/machines`). Supply its returned
+machine ID and single-use registration token to the daemon, then run:
 
 ```sh
-process-execution-host-daemon configure \
+process-execution-host-daemon register \
   --gateway-url https://gateway.example.com \
-  --host-id 00000000-0000-0000-0000-000000000001 < /path/to/private-token.txt
+  --machine-id 00000000-0000-0000-0000-000000000001 < /path/to/private-token.txt
 process-execution-host-daemon run
 ```
 
-The example host UUID is a placeholder. The credential is one ASCII line on stdin;
+The example machine UUID is a placeholder. The registration token is one ASCII line on stdin;
 it is never accepted as a command-line argument or printed. Keep any source token file
-private and remove it when it is no longer needed.
+private and remove it when it is no longer needed. Registration tokens expire after
+15 minutes. If registration is interrupted after the token is consumed, request a new
+one through `POST /v1/machines/:machineId/registration` and repeat `register`.
 
 PowerShell can provide the same input:
 
 ```powershell
-Get-Content -Raw C:\private\token.txt | process-execution-host-daemon.exe configure `
+Get-Content -Raw C:\private\token.txt | process-execution-host-daemon.exe register `
   --gateway-url https://gateway.example.com `
-  --host-id 00000000-0000-0000-0000-000000000001
+  --machine-id 00000000-0000-0000-0000-000000000001
 process-execution-host-daemon.exe run
 ```
 
 The gateway connection URL is derived from the base URL as
-`/v1/hosts/HOST_ID/connect` (retaining any base path). HTTPS becomes WSS. TLS validates
+`/v1/machines/MACHINE_ID/connect` (retaining any base path). HTTPS becomes WSS. TLS validates
 the gateway using the operating system's trusted roots. The host credential identifies
 the device to the gateway.
 
 `run --gateway-url URL` overrides the configured base URL, but it must match the gateway
-bound to the stored credential. To change gateways, stop the daemon and configure a
-credential issued by the new gateway. There is no automatic credential forwarding or
+bound to the stored credential. To change gateways, stop the daemon and register with the new gateway. There is no automatic credential forwarding or
 fallback to an unrelated server.
 
 ## CLI and state
 
 | Command | Purpose |
 |---|---|
-| `configure --gateway-url URL --host-id UUID` | Read the credential from stdin and save the registration locally |
+| `register --gateway-url URL --machine-id UUID` | Exchange the registration token from stdin and save the machine credential |
+| `configure --gateway-url URL --machine-id UUID` | Save an already-issued machine credential from stdin (`--host-id` remains an alias) |
 | `run [--gateway-url URL] [--config FILE]` | Maintain the connection and serve execution requests |
 | `status` | Print configuration presence, whether the state lock is held, and the last runtime/connection status |
 | `version` | Print binary, execution protocol, OS, and architecture versions |
@@ -73,11 +75,12 @@ Choose a dedicated application directory. The daemon sets it private to the curr
 account: mode `0700` on Unix or an inheritable current-user-only DACL on Windows.
 Credentials use atomic replacement and mode `0600` on Unix. The directory stores
 `identity.json`, `credential.json`, `status.json`, and `daemon.lock`. Only one daemon or
-configuration operation can own the directory at a time.
+registration/configuration operation can own the directory at a time.
 
 Status contains no credential. `running: false` means the saved connection snapshot is
 historical. An installation ID survives restarts; a runtime generation does not. Execution
-records, input receipts, and output remain in memory, not in the state directory.
+records, request receipts, and output remain in memory, not in the state directory.
+Existing profiles keep working; the stored `host_id` identifies the gateway machine.
 
 Logs go to stderr. `run` leaves stdout empty. Configuration/authentication/protocol
 failures exit with code 2; a local Ctrl-C or Unix SIGTERM shuts down cleanly with code 0.
@@ -106,7 +109,7 @@ configuration as [process-execution](../process-execution/README.md#configuratio
 Relative paths resolve against the daemon's launch directory. The gateway selection
 order is CLI, JSON configuration, then stored registration; no URL is built in.
 
-For a local mock gateway, both `configure` and `run` support `--allow-insecure-loopback`.
+For local development, `register`, `configure`, and `run` support `--allow-insecure-loopback`.
 The run configuration can also set `allow_insecure_loopback: true`. This permits HTTP/WS
 only for loopback addresses or `localhost`; there is no option to disable TLS verification.
 
@@ -129,10 +132,27 @@ parallel operations per batch. Output queues and messages are bounded. Excess re
 receive a resource-limit error; a stalled connection is dropped. Slow or disconnected
 gateways cannot block the core's output collection indefinitely.
 
-Accepted commands and batches belong to the daemon. Disconnecting loses pending network
-responses but preserves command execution, batch progress, and retained output. After
-reconnecting, list/get/observe and existing operation retry IDs recover the state. No
-network timeout serves as a command execution deadline.
+Accepted commands and batches belong to the daemon. When both peers negotiate
+`request_recovery`, the daemon records acceptance before dispatch, retains each complete
+operation/batch response across reconnects, and releases it only after the gateway
+acknowledges durable completion. Reconnecting resends retained responses; recovery queries
+return a pending receipt, the saved response, or `missing`. They never execute work.
+Repeating the same unacknowledged request ID and normalized input returns its receipt;
+changed input closes the connection. The gateway never redispatches an ambiguous job.
+
+Receipt storage is bounded to 128 envelopes and 256 MiB, including an 8 MiB response
+reservation for each pending envelope. Capacity pressure rejects new requests; it does
+not evict unacknowledged responses. Receipts have no in-runtime expiry. The gateway waits
+up to 24 hours for a disconnected runtime to recover its responses, then settles remaining
+jobs as `unknown`. A daemon restart changes generation and makes old receipts unavailable.
+An acknowledgement for a terminal job releases its receipt even if that job was already
+settled as `unknown`; terminal results are immutable.
+
+Legacy gateways that omit recovery negotiation keep connection-scoped responses. With
+those peers, reconnects preserve command/batch progress but lose pending network responses.
+Callers can still use list/get/observe and per-operation retry identities. No network
+timeout serves as a command execution deadline. No automatic command observation or
+command-exit notification is added.
 
 HTTP 401/403, revocation, replacement, or an incompatible protocol stops reconnection,
 records `needs_configuration`, and shuts down owned processes. The credential stays
@@ -142,7 +162,7 @@ in-memory records on restart.
 
 ## Start automatically under the user account
 
-Configure and verify the daemon first, then use the OS's user startup facilities. The
+Register and verify the daemon first, then use the OS's user startup facilities. The
 binary itself does not install or modify a service automatically.
 
 On Linux, create `~/.config/systemd/user/process-execution-host.service` with absolute
@@ -192,6 +212,6 @@ leases, and pause/resume belong to future outer adapters.
 
 Integration tests start the real daemon against a mock gateway and verify authentication,
 batch dispatch, missed-heartbeat reconnection, retained execution/output, batch continuation,
-generation checks, revocation, incompatible versions, exclusive ownership, credential
+request receipt replay/acknowledgements, generation checks, revocation, incompatible versions, exclusive ownership, credential
 binding/privacy, and local shutdown. The CI matrix runs the workspace suite and produces
-both binary artifacts on Linux, macOS, and Windows.
+binary artifacts on Linux, macOS, and Windows.

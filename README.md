@@ -23,6 +23,9 @@ This repository is a Cargo workspace for multiple Rust applications and reusable
 - [process-execution-host-daemon](apps/process-execution-host-daemon/README.md) — an
   installed user-account host with an authenticated outbound gateway connection,
   reconnects, and an embedded execution runtime.
+- [execution-gateway](apps/execution-gateway/README.md) — authenticated machine
+  registration and command routing, durable operation/batch jobs, PostgreSQL
+  persistence, and signed job-result webhooks.
 
 Create a new application:
 
