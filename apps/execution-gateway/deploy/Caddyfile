@@ -1,0 +1,4 @@
+execution.acentric.dev, execution-gateway-2.34-47-214-92.sslip.io {
+	encode zstd gzip
+	reverse_proxy gateway:3000
+}

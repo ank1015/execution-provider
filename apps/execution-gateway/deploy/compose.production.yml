@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  migrate:
+    image: ${GATEWAY_IMAGE}
+    command: migrate
+    env_file: runtime.env
+    restart: "no"
+
+  gateway:
+    image: ${GATEWAY_IMAGE}
+    command: serve
+    env_file: runtime.env
+    expose:
+      - "3000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
