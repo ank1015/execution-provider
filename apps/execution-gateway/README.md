@@ -70,6 +70,32 @@ Run migrations explicitly before deploying a new binary. Startup never applies
 migrations. `/healthz` checks liveness and `/readyz` checks database/job-table
 availability; neither promises that an individual machine is online.
 
+Production deployment files live in [`deploy`](deploy). Changes to the gateway,
+its migrations, its shared protocol, or those deployment files trigger
+`Deploy execution gateway` after they reach `main`. The workflow builds and pushes
+an immutable image, runs embedded SQLx migrations while the current gateway still
+serves, replaces the container, and checks both health endpoints. A failed startup
+restores the previous image. Database migrations remain applied, so every migration
+must be additive and compatible with both the previous and new gateway versions.
+Keep DDL short; PostgreSQL locks taken by a migration can affect live requests even
+though the old gateway remains online during migration.
+
+The current single-owner design requires a short handover instead of overlapping
+gateway replicas. Accepted HTTP requests receive up to the 15-second application
+shutdown deadline to finish. Caddy remains online, but requests arriving between
+the old process exiting and the new process becoming ready can receive `502`.
+Machine WebSockets close and reconnect automatically. Daemons that negotiated
+response recovery reconcile accepted operations from retained receipts without
+executing them again; daemon-side processes continue running. Older daemons can
+leave an interrupted response in the `unknown` state. True zero-downtime gateway
+deployment requires multi-instance connection ownership and routing.
+
+GitHub authenticates through the `execution-provider` Workload Identity provider
+and the dedicated `execution-gateway-deployer` service account. Runtime values are
+read on the VM from the `execution-gateway-2-database-url`,
+`execution-gateway-2-admin-api-key`, and `execution-gateway-2-encryption-key`
+Secret Manager entries. GitHub stores no database or gateway credentials.
+
 Logs go to stderr and omit credentials, command payloads, output, and raw database
 or callback errors. CLI configuration/startup failures exit with code 2.
 SIGINT/SIGTERM initiates shutdown: stop admission, close machine sockets without

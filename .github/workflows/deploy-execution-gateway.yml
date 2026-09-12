@@ -1,0 +1,118 @@
+name: Deploy execution gateway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy-execution-gateway.yml
+      - Cargo.lock
+      - Cargo.toml
+      - apps/execution-gateway/Cargo.toml
+      - apps/execution-gateway/build.rs
+      - apps/execution-gateway/src/**
+      - apps/execution-gateway/migrations/**
+      - apps/execution-gateway/deploy/**
+      - packages/process-execution-protocol/Cargo.toml
+      - packages/process-execution-protocol/build.rs
+      - packages/process-execution-protocol/src/**
+      - packages/process-execution-core/Cargo.toml
+      - packages/process-execution-core/src/**
+  workflow_dispatch:
+
+concurrency:
+  group: execution-gateway-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: project-2c02a9f6-1ff5-461d-ae0
+  GCP_PROJECT_NUMBER: "361197090477"
+  GCP_REGION: asia-south1
+  GCP_ZONE: asia-south1-a
+  GATEWAY_INSTANCE: execution-gateway-2
+  GATEWAY_HOST: execution.acentric.dev
+  IMAGE: asia-south1-docker.pkg.dev/project-2c02a9f6-1ff5-461d-ae0/execution/execution-gateway
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: gateway_test
+          POSTGRES_PASSWORD: gateway_test
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway_test -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify gateway
+        run: |
+          cargo build --workspace --bins --locked
+          cargo test -p execution-gateway --locked
+          cargo test -p execution-gateway --test gateway --locked -- --ignored
+        env:
+          TEST_DATABASE_URL: postgres://gateway_test:gateway_test@localhost:5432/postgres
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/361197090477/locations/global/workloadIdentityPools/github-actions/providers/execution-provider
+          service_account: execution-gateway-deployer@project-2c02a9f6-1ff5-461d-ae0.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+      - name: Build and publish image
+        run: |
+          docker build \
+            --file apps/execution-gateway/deploy/Dockerfile \
+            --tag "$IMAGE:$GITHUB_SHA" \
+            .
+          docker run --rm "$IMAGE:$GITHUB_SHA" version
+          docker push "$IMAGE:$GITHUB_SHA"
+
+      - name: Upload deployment files
+        run: >-
+          gcloud compute scp
+          apps/execution-gateway/deploy/Caddyfile
+          apps/execution-gateway/deploy/compose.production.yml
+          apps/execution-gateway/deploy/deploy.sh
+          "$GATEWAY_INSTANCE:./"
+          --project="$GCP_PROJECT_ID"
+          --zone="$GCP_ZONE"
+          --tunnel-through-iap
+          --quiet
+
+      - name: Deploy gateway
+        run: |
+          gcloud compute ssh "$GATEWAY_INSTANCE" \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_ZONE" \
+            --tunnel-through-iap \
+            --quiet \
+            --command="sudo sh -c 'cat Caddyfile > /opt/execution-gateway/release/Caddyfile' && sudo install -m 0600 compose.production.yml /opt/execution-gateway/release/compose.production.yml && sudo install -m 0700 deploy.sh /opt/execution-gateway/release/deploy.sh && sudo env GATEWAY_IMAGE=$IMAGE:$GITHUB_SHA GATEWAY_HOST=$GATEWAY_HOST GCP_PROJECT_NUMBER=$GCP_PROJECT_NUMBER /opt/execution-gateway/release/deploy.sh"
+
+      - name: Verify production
+        run: |
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 "https://$GATEWAY_HOST/healthz"
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 "https://$GATEWAY_HOST/readyz"
