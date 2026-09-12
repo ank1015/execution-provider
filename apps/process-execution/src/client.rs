@@ -40,5 +40,5 @@ pub async fn exchange_and_print(
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &response)?;
     writeln!(stdout)?;
-    Ok(response.is_ok())
+    Ok(response.succeeded())
 }

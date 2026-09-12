@@ -8,7 +8,14 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
+mod batch;
+pub mod gateway;
+pub mod runtime_config;
+pub use batch::*;
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 pub const VERSION: u32 = 1;
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -17,7 +24,7 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation_id: Option<Uuid>,
     #[serde(flatten)]
-    pub operation: Operation,
+    pub payload: Payload,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,7 +150,7 @@ impl Response {
     ) -> Self {
         Self {
             protocol_version: VERSION,
-            request_id,
+            request_id: request_id.filter(|id| id.len() <= 256),
             generation_id,
             outcome: match result {
                 Ok(result) => Outcome::Ok { result },
@@ -163,36 +170,19 @@ pub fn invalid(message: impl Into<String>) -> core::Error {
     }
 }
 
-pub fn version_info() -> Value {
-    json!({"binary": "process-execution", "version": env!("CARGO_PKG_VERSION"),
+pub fn version_info(name: &str, version: &str) -> Value {
+    json!({"binary": name, "version": version,
         "protocol_version": VERSION, "platform": std::env::consts::OS, "architecture": std::env::consts::ARCH})
 }
 
-pub async fn dispatch(
+async fn dispatch_operation(
     runtime: &core::ProcessExecutionCore,
-    request: Request,
+    operation: Operation,
+    binary: &Value,
 ) -> core::Result<Value> {
-    if request.protocol_version != VERSION {
-        return Err(invalid(format!(
-            "unsupported protocol version {}; expected {VERSION}",
-            request.protocol_version
-        )));
-    }
-    if request.request_id.is_empty() {
-        return Err(invalid("request_id is empty"));
-    }
     let info = runtime.runtime_info();
-    if request
-        .expected_generation_id
-        .is_some_and(|id| id != info.generation_id)
-    {
-        return Err(core::Error {
-            code: core::ErrorCode::GenerationMismatch,
-            message: "supervisor generation changed".into(),
-        });
-    }
-    match request.operation {
-        Operation::Info => Ok(json!({"runtime": info, "binary": version_info()})),
+    match operation {
+        Operation::Info => Ok(json!({"runtime": info, "binary": binary})),
         Operation::Shutdown => {
             runtime.shutdown().await?;
             Ok(json!({"shutdown": true}))

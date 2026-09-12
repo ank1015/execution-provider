@@ -8,7 +8,7 @@ use std::{
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct FileConfig {
+pub struct RuntimeConfig {
     cwd: Option<PathBuf>,
     default_shell: Option<Shell>,
     env: BTreeMap<String, String>,
@@ -33,15 +33,21 @@ struct LimitOverrides {
 }
 
 pub fn load(path: Option<&Path>, cwd: Option<PathBuf>) -> crate::Result<Config> {
-    let file: FileConfig = match path {
+    let file: RuntimeConfig = match path {
         Some(path) => serde_json::from_reader(std::fs::File::open(path)?)?,
-        None => FileConfig::default(),
+        None => RuntimeConfig::default(),
     };
-    let mut config = Config::new(cwd.or(file.cwd).unwrap_or(std::env::current_dir()?));
-    config.default_shell = file.default_shell;
-    config.env = file.env;
-    file.limits.apply(&mut config.limits);
-    Ok(config)
+    file.into_core(cwd)
+}
+
+impl RuntimeConfig {
+    pub fn into_core(self, cwd: Option<PathBuf>) -> crate::Result<Config> {
+        let mut config = Config::new(cwd.or(self.cwd).unwrap_or(std::env::current_dir()?));
+        config.default_shell = self.default_shell;
+        config.env = self.env;
+        self.limits.apply(&mut config.limits);
+        Ok(config)
+    }
 }
 
 impl LimitOverrides {

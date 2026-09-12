@@ -1,6 +1,6 @@
 use crate::{
     framing,
-    protocol::{self, Operation, Request, Response},
+    protocol::{self, Dispatcher, Request, Response},
     transport,
 };
 use process_execution_core::{Config, ProcessExecutionCore};
@@ -18,6 +18,10 @@ const MAX_CONNECTIONS: usize = 128;
 pub async fn serve(endpoint: &OsStr, config: Config) -> crate::Result<()> {
     let mut listener = transport::Listener::bind(endpoint).await?;
     let core = ProcessExecutionCore::new(config)?;
+    let dispatcher = Dispatcher::local(
+        core.clone(),
+        protocol::version_info("process-execution", env!("CARGO_PKG_VERSION")),
+    );
     let stop = CancellationToken::new();
     let mut handlers = JoinSet::new();
     let _ = writeln!(
@@ -36,7 +40,7 @@ pub async fn serve(endpoint: &OsStr, config: Config) -> crate::Result<()> {
             accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) if handlers.len() < MAX_CONNECTIONS => {
-                        handlers.spawn(handle(stream, core.clone(), stop.clone()));
+                        handlers.spawn(handle(stream, dispatcher.clone(), stop.clone()));
                     }
                     Ok(_) => { /* The caller can retry once another connection finishes. */ }
                     Err(error) => break Err(error.into()),
@@ -57,9 +61,9 @@ pub async fn serve(endpoint: &OsStr, config: Config) -> crate::Result<()> {
     result
 }
 
-async fn handle(stream: transport::Stream, core: ProcessExecutionCore, stop: CancellationToken) {
+async fn handle(stream: transport::Stream, dispatcher: Dispatcher, stop: CancellationToken) {
     let mut stream = BufReader::new(stream);
-    let generation = core.runtime_info().generation_id;
+    let generation = dispatcher.generation_id();
     let frame = match tokio::time::timeout(FRAME_TIMEOUT, framing::read(&mut stream)).await {
         Ok(Ok(frame)) => frame,
         Ok(Err(error)) => {
@@ -77,15 +81,21 @@ async fn handle(stream: transport::Stream, core: ProcessExecutionCore, stop: Can
         .and_then(|v| v.get("request_id")?.as_str())
         .map(str::to_owned);
     let request: Result<Request, _> = parsed.and_then(serde_json::from_value);
-    let (result, wants_shutdown) = match request {
+    let (response, wants_shutdown) = match request {
         Ok(request) => {
-            let shutdown = matches!(request.operation, Operation::Shutdown);
-            (protocol::dispatch(&core, request).await, shutdown)
+            let shutdown = request.requests_shutdown();
+            (dispatcher.dispatch(request).await, shutdown)
         }
-        Err(error) => (Err(protocol::invalid(error.to_string())), false),
+        Err(error) => (
+            Response::new(
+                request_id,
+                generation,
+                Err(protocol::invalid(error.to_string())),
+            ),
+            false,
+        ),
     };
-    let shutdown = wants_shutdown && result.is_ok();
-    let response = Response::new(request_id, generation, result);
+    let shutdown = wants_shutdown && response.is_ok();
     let _ = send(&mut stream, &response).await;
     if shutdown {
         stop.cancel();
@@ -96,18 +106,7 @@ async fn send(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     response: &Response,
 ) -> crate::Result<()> {
-    let mut frame = serde_json::to_vec(response)?;
-    if frame.len() >= framing::MAX_FRAME_BYTES {
-        let error = process_execution_core::Error {
-            code: process_execution_core::ErrorCode::ResourceLimit,
-            message: "response exceeds 8 MiB; reduce the requested output or page size".into(),
-        };
-        frame = serde_json::to_vec(&Response::new(
-            response.request_id.clone(),
-            response.generation_id,
-            Err(error),
-        ))?;
-    }
+    let frame = protocol::encode_response(response)?;
     tokio::time::timeout(FRAME_TIMEOUT, framing::write(stream, &frame)).await??;
     Ok(())
 }
