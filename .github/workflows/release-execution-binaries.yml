@@ -1,0 +1,189 @@
+name: Release execution binaries
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-execution-binaries.yml
+      - Cargo.lock
+      - Cargo.toml
+      - apps/process-execution/Cargo.toml
+      - apps/process-execution/src/**
+      - apps/process-execution-host-daemon/Cargo.toml
+      - apps/process-execution-host-daemon/src/**
+      - packages/process-execution-core/Cargo.toml
+      - packages/process-execution-core/src/**
+      - packages/process-execution-protocol/Cargo.toml
+      - packages/process-execution-protocol/src/**
+  workflow_dispatch:
+
+concurrency:
+  group: execution-binary-releases
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RELEASE_BUCKET: execution-provider-releases-361197090477
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            os: ubuntu-latest
+            artifact: execution-binaries-linux-x86_64
+          - name: macOS universal
+            os: macos-latest
+            artifact: execution-binaries-macos-universal
+          - name: Windows x86-64
+            os: windows-latest
+            artifact: execution-binaries-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Linux binaries
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked \
+            -p process-execution \
+            -p process-execution-host-daemon
+          target/release/process-execution version
+          target/release/process-execution-host-daemon version
+          mkdir -p dist
+          tar -C target/release -czf dist/process-execution-linux-x86_64.tar.gz process-execution
+          tar -C target/release -czf dist/process-execution-host-daemon-linux-x86_64.tar.gz process-execution-host-daemon
+
+      - name: Build universal macOS binaries
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --locked \
+            --target x86_64-apple-darwin \
+            -p process-execution \
+            -p process-execution-host-daemon
+          cargo build --release --locked \
+            --target aarch64-apple-darwin \
+            -p process-execution \
+            -p process-execution-host-daemon
+          mkdir -p dist/bin
+          lipo -create \
+            target/x86_64-apple-darwin/release/process-execution \
+            target/aarch64-apple-darwin/release/process-execution \
+            -output dist/bin/process-execution
+          lipo -create \
+            target/x86_64-apple-darwin/release/process-execution-host-daemon \
+            target/aarch64-apple-darwin/release/process-execution-host-daemon \
+            -output dist/bin/process-execution-host-daemon
+          dist/bin/process-execution version
+          dist/bin/process-execution-host-daemon version
+          tar -C dist/bin -czf dist/process-execution-macos-universal.tar.gz process-execution
+          tar -C dist/bin -czf dist/process-execution-host-daemon-macos-universal.tar.gz process-execution-host-daemon
+
+      - name: Build Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked `
+            -p process-execution `
+            -p process-execution-host-daemon
+          & .\target\release\process-execution.exe version
+          & .\target\release\process-execution-host-daemon.exe version
+          New-Item -ItemType Directory -Force -Path dist\process-execution | Out-Null
+          New-Item -ItemType Directory -Force -Path dist\process-execution-host-daemon | Out-Null
+          Copy-Item target\release\process-execution.exe dist\process-execution\
+          Copy-Item target\release\process-execution-host-daemon.exe dist\process-execution-host-daemon\
+          Compress-Archive -Path dist\process-execution\process-execution.exe -DestinationPath dist\process-execution-windows-x86_64.zip
+          Compress-Archive -Path dist\process-execution-host-daemon\process-execution-host-daemon.exe -DestinationPath dist\process-execution-host-daemon-windows-x86_64.zip
+
+      - name: Upload packaged binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish to Cloud Storage
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: execution-binaries-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums and manifest
+        working-directory: dist
+        run: |
+          LC_ALL=C sha256sum *.tar.gz *.zip | sort -k2 > checksums.sha256
+          artifacts_json="$(
+            for file in *.tar.gz *.zip; do
+              sha256="$(sha256sum "$file" | cut -d ' ' -f 1)"
+              size="$(stat -c %s "$file")"
+              jq -n \
+                --arg name "$file" \
+                --arg sha256 "$sha256" \
+                --arg uri "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/$file" \
+                --argjson sizeBytes "$size" \
+                '{name: $name, sha256: $sha256, sizeBytes: $sizeBytes, uri: $uri}'
+            done | jq -s .
+          )"
+          jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --arg createdAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg bucket "gs://$RELEASE_BUCKET" \
+            --argjson artifacts "$artifacts_json" \
+            '{commit: $commit, createdAt: $createdAt, bucket: $bucket, artifacts: $artifacts}' \
+            > manifest.json
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/361197090477/locations/global/workloadIdentityPools/github-actions/providers/execution-provider
+          service_account: execution-release-publisher@project-2c02a9f6-1ff5-461d-ae0.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Publish immutable release
+        run: |
+          gcloud storage cp \
+            --cache-control="private,max-age=31536000,immutable" \
+            dist/*.tar.gz dist/*.zip dist/checksums.sha256 \
+            "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/"
+          gcloud storage cp \
+            --cache-control="private,max-age=31536000,immutable" \
+            dist/manifest.json \
+            "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/manifest.json"
+
+      - name: Update latest release
+        run: |
+          gcloud storage cp \
+            --cache-control="private,no-cache,max-age=0" \
+            dist/*.tar.gz dist/*.zip dist/checksums.sha256 \
+            "gs://$RELEASE_BUCKET/latest/"
+          gcloud storage cp \
+            --cache-control="private,no-cache,max-age=0" \
+            dist/manifest.json \
+            "gs://$RELEASE_BUCKET/latest/manifest.json"

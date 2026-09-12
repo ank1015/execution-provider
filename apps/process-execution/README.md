@@ -15,8 +15,20 @@ cargo build --release -p process-execution --locked
 
 The executable is `target/release/process-execution` on Linux/macOS, or
 `target/release/process-execution.exe` on Windows. Build on the destination OS and
-architecture. Workspace CI builds and tests on all three operating systems and
-uploads each runner's release binary as an artifact.
+architecture.
+
+Merges to `main` that affect either execution binary publish Linux x86-64, Windows
+x86-64, and universal macOS archives to the private Cloud Storage bucket
+`gs://execution-provider-releases-361197090477`. Immutable releases live under
+`releases/COMMIT_SHA/`; `latest/` points to the newest release. Each directory has
+SHA-256 checksums and a JSON manifest. For example:
+
+```sh
+gcloud storage cp gs://execution-provider-releases-361197090477/latest/process-execution-linux-x86_64.tar.gz .
+gcloud storage cp gs://execution-provider-releases-361197090477/latest/checksums.sha256 .
+sha256sum --check --ignore-missing checksums.sha256
+tar -xzf process-execution-linux-x86_64.tar.gz
+```
 
 Windows requires Windows 10 version 1809+ or Windows Server 2019+ for ConPTY support.
 The following examples assume the executable is on `PATH`.

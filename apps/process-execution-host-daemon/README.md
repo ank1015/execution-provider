@@ -17,7 +17,19 @@ cargo install --path apps/process-execution-host-daemon --locked
 ```
 
 Alternatively, `cargo build --workspace --release --locked` creates the daemon in
-`target/release/`; append `.exe` on Windows. CI uploads release binaries for each OS.
+`target/release/`; append `.exe` on Windows. Merges to `main` publish Linux x86-64,
+Windows x86-64, and universal macOS archives to the private bucket
+`gs://execution-provider-releases-361197090477`. Use `latest/` for the newest build
+or `releases/COMMIT_SHA/` for an immutable build. Each location includes
+`checksums.sha256` and `manifest.json`. For example:
+
+```sh
+gcloud storage cp gs://execution-provider-releases-361197090477/latest/process-execution-host-daemon-linux-x86_64.tar.gz .
+gcloud storage cp gs://execution-provider-releases-361197090477/latest/checksums.sha256 .
+sha256sum --check --ignore-missing checksums.sha256
+tar -xzf process-execution-host-daemon-linux-x86_64.tar.gz
+```
+
 Windows requires Windows 10 version 1809+ or Windows Server 2019+.
 
 Create a machine with the gateway user API (`POST /v1/machines`). Supply its returned
