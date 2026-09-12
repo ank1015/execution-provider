@@ -1,0 +1,24 @@
+[package]
+name = "process-execution"
+version = "0.1.0"
+edition.workspace = true
+description = "Local IPC host and CLI relay for process-execution-core"
+
+[dependencies]
+process-execution-core = { path = "../../packages/process-execution-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Pipes"] }
+
+[dev-dependencies]
+tempfile = "3"
