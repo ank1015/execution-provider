@@ -1,0 +1,24 @@
+[package]
+name = "process-execution-core"
+version = "0.1.0"
+edition.workspace = true
+description = "Local process supervision with pipes, terminals, and replayable output"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "net"] }
+tokio-util = { version = "0.7", features = ["rt", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+which = "8"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+portable-pty = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_IO", "Win32_System_Console", "Win32_System_Pipes", "Win32_Security"] }
+
+[dev-dependencies]
+tempfile = "3"
