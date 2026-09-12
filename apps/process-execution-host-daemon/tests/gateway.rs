@@ -197,7 +197,7 @@ async fn accept(listener: &TcpListener, id: Uuid) -> (Socket, Value) {
                 request.headers().get("authorization").unwrap(),
                 &format!("Bearer {TOKEN}")
             );
-            assert_eq!(request.uri().path(), format!("/v1/hosts/{id}/connect"));
+            assert_eq!(request.uri().path(), format!("/v1/machines/{id}/connect"));
             Ok(response)
         })
         .await
@@ -495,4 +495,84 @@ async fn local_sigterm_shuts_down_cleanly() {
     }
     host.exited(0).await;
     assert_eq!(host.status().await["last_status"]["state"], "stopped");
+}
+
+#[tokio::test]
+async fn request_receipts_survive_reconnect_and_release_only_after_acknowledgement() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut host = Host::start(&listener).await;
+    let (mut first, hello) = accept(&listener, host.id).await;
+    assert_eq!(hello["request_recovery"], true);
+    let generation = hello["runtime"]["generation_id"].clone();
+    let welcome = json!({"type":"welcome","protocol_version":1,"connection_id":Uuid::new_v4(),"heartbeat_interval_ms":1000,"request_recovery":true});
+    send(&mut first, welcome.clone()).await;
+    let mut operation = start("sleep-once", &["sleep"]);
+    operation["request_id"] = json!("start");
+    operation["params"]["wait_ms"] = json!(2000);
+    let request = json!({"protocol_version":1,"request_id":"retained-batch","expected_generation_id":generation,
+        "mode":"sequential","operations":[operation, {"request_id":"list","operation":"execution.list","params":{"state":"all"}}]});
+    send(&mut first, json!({"type":"request","request":request})).await;
+    assert_eq!(receive(&mut first).await["type"], "accepted");
+    // Repeating the envelope cannot start another batch, even while it is pending.
+    send(&mut first, json!({"type":"request","request":request})).await;
+    assert_eq!(receive(&mut first).await["type"], "accepted");
+    drop(first);
+    let (mut second, resumed) = accept(&listener, host.id).await;
+    assert_eq!(resumed["runtime"]["generation_id"], generation);
+    send(&mut second, welcome.clone()).await;
+    send(
+        &mut second,
+        json!({"type":"recover","request_id":"retained-batch","generation_id":generation}),
+    )
+    .await;
+    let result = loop {
+        let message = receive(&mut second).await;
+        if message["type"] == "response" {
+            break message;
+        }
+        assert_eq!(message["type"], "accepted");
+    };
+    assert_eq!(
+        result["response"]["result"]["results"][1]["result"]["executions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Losing the connection after receiving the result but before acknowledging it
+    // causes the exact retained result to be sent on the next connection.
+    drop(second);
+    let (mut third, _) = accept(&listener, host.id).await;
+    send(&mut third, welcome).await;
+    assert_eq!(receive(&mut third).await, result);
+    send(
+        &mut third,
+        json!({"type":"acknowledge","request_id":"retained-batch","generation_id":Uuid::new_v4()}),
+    )
+    .await;
+    send(
+        &mut third,
+        json!({"type":"recover","request_id":"retained-batch","generation_id":generation}),
+    )
+    .await;
+    assert_eq!(receive(&mut third).await, result);
+    send(
+        &mut third,
+        json!({"type":"acknowledge","request_id":"retained-batch","generation_id":generation}),
+    )
+    .await;
+    send(
+        &mut third,
+        json!({"type":"recover","request_id":"retained-batch","generation_id":generation}),
+    )
+    .await;
+    // A response already queued before the ack is harmless; the receipt is gone.
+    loop {
+        let message = receive(&mut third).await;
+        if message["type"] == "missing" {
+            break;
+        }
+        assert_eq!(message, result);
+    }
+    host.revoke(&mut third).await;
 }
