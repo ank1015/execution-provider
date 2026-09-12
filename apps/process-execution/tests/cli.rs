@@ -483,6 +483,7 @@ async fn terminal_resize_input_and_completion() {
             Some(json!({"type": "pty", "rows": 24, "cols": 80})),
         ))
         .await;
+    assert_eq!(result["execution"]["state"], "running", "{result}");
     let handle = &result["execution"]["handle"];
     let resized = server
         .ok(&server.request(

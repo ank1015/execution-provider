@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  platform:
+    name: Platform (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-latest
+            binary: target/release/process-execution
+          - platform: macOS
+            os: macos-latest
+            binary: target/release/process-execution
+          - platform: Windows
+            os: windows-latest
+            binary: target/release/process-execution.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked --no-fail-fast
+      - run: cargo run -p process-execution-core --example run --locked
+      - run: cargo build -p process-execution --release --locked
+      - run: ${{ matrix.binary }} version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: process-execution-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  required:
+    name: CI passed
+    if: always()
+    needs: [format, platform]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require formatting and every platform to pass
+        env:
+          FORMAT_RESULT: ${{ needs.format.result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
+        run: test "$FORMAT_RESULT" = success && test "$PLATFORM_RESULT" = success

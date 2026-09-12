@@ -622,12 +622,16 @@ async fn output_limit_returns_before_a_long_wait_finishes() {
 }
 
 fn child_pid(observation: &Observation) -> u32 {
-    String::from_utf8_lossy(&bytes(observation))
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("child=")
-                .and_then(|id| id.trim().parse().ok())
-        })
+    let output = String::from_utf8_lossy(&bytes(observation)).into_owned();
+    // Terminal output can wrap the fixture's text in ConPTY escape sequences.
+    output
+        .split_once("child=")
+        .unwrap_or_else(|| panic!("child PID missing from {output:?}"))
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
         .unwrap()
 }
 

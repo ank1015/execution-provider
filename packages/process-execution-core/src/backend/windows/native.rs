@@ -87,6 +87,12 @@ pub(super) fn spawn(launch: &Launch) -> Result<NativeProcess> {
     let mut inherited = Vec::new();
     match launch.io {
         IoMode::Pty { rows, cols } => {
+            // Use the pseudoconsole's standard handles, even when the supervisor's
+            // own stdin/stdout/stderr are redirected to null, pipes, or log files.
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
             let mut handle = 0;
             hresult(unsafe {
                 CreatePseudoConsole(
