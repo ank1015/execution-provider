@@ -1,0 +1,31 @@
+[package]
+name = "process-execution-host-daemon"
+version = "0.1.0"
+edition.workspace = true
+description = "User-owned execution host with an authenticated outbound gateway connection"
+
+[dependencies]
+process-execution-core = { path = "../../packages/process-execution-core" }
+process-execution-protocol = { path = "../../packages/process-execution-protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["process", "io-util"] }
+base64 = "0.22"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

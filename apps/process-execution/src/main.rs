@@ -1,11 +1,10 @@
 mod client;
-mod config;
 mod framing;
-mod protocol;
 mod server;
 mod transport;
 
 use clap::{Args, Parser, Subcommand};
+use process_execution_protocol::{self as protocol, runtime_config as config};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode, time::Duration};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -102,7 +101,7 @@ async fn run(cli: Cli) -> Result<bool> {
                 protocol_version: protocol::VERSION,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 expected_generation_id: None,
-                operation: protocol::Operation::Info,
+                payload: protocol::Payload::Single(protocol::Operation::Info),
             };
             client::exchange_and_print(
                 &endpoint.endpoint,
@@ -112,7 +111,10 @@ async fn run(cli: Cli) -> Result<bool> {
             .await
         }
         Command::Version => {
-            println!("{}", protocol::version_info());
+            println!(
+                "{}",
+                protocol::version_info("process-execution", env!("CARGO_PKG_VERSION"))
+            );
             Ok(true)
         }
     }

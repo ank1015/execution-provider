@@ -295,6 +295,28 @@ async fn version_health_and_graceful_shutdown() {
 }
 
 #[tokio::test]
+async fn rpc_supports_batches_and_sets_exit_code_for_partial_failure() {
+    let server = Server::start().await;
+    let batch = json!({"protocol_version": 1, "request_id": "batch", "mode": "parallel", "operations": [
+        {"request_id": "one", "operation": "runtime.info"},
+        {"request_id": "two", "operation": "execution.list", "params": {}}
+    ]});
+    let output = rpc(&server.endpoint, &batch).await;
+    assert!(output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["results"].as_array().unwrap().len(), 2);
+    let mut batch = batch;
+    batch["mode"] = json!("sequential");
+    batch["operations"][0] =
+        json!({"request_id": "invalid", "operation": "execution.list", "params": {"limit": 0}});
+    let output = rpc(&server.endpoint, &batch).await;
+    assert!(!output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["results"][0]["status"], "error");
+    assert_eq!(response["result"]["results"][1]["status"], "skipped");
+}
+
+#[tokio::test]
 async fn starts_use_configured_environment_and_working_directory() {
     let server = Server::start().await;
     let result = server

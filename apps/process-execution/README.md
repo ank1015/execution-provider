@@ -95,6 +95,13 @@ nonzero exit code is an execution result, not an RPC failure.
 
 ## Protocol version 1
 
+The shared [process-execution-protocol](../../packages/process-execution-protocol/README.md)
+package owns request/response types and dispatch. Single-operation requests remain
+unchanged. It also supports batches through `operations: [...]` and
+`mode: "sequential"` (default) or `"parallel"`. See the shared package for batch
+limits, retry semantics, and examples. A batch containing errors or skipped operations
+prints the per-operation results and exits with code 1.
+
 Every request has this envelope:
 
 ```json

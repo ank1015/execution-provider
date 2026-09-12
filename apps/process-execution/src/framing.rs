@@ -1,7 +1,7 @@
 use std::io;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub use process_execution_protocol::MAX_FRAME_BYTES;
 
 pub async fn read(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Vec<u8>> {
     let mut frame = Vec::new();

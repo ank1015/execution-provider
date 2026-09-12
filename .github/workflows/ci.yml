@@ -35,12 +35,18 @@ jobs:
           - platform: Linux
             os: ubuntu-latest
             binary: target/release/process-execution
+            daemon: target/release/process-execution-host-daemon
+            gateway: target/release/execution-gateway
           - platform: macOS
             os: macos-latest
             binary: target/release/process-execution
+            daemon: target/release/process-execution-host-daemon
+            gateway: target/release/execution-gateway
           - platform: Windows
             os: windows-latest
             binary: target/release/process-execution.exe
+            daemon: target/release/process-execution-host-daemon.exe
+            gateway: target/release/execution-gateway.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -52,18 +58,55 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
       - run: cargo run -p process-execution-core --example run --locked
-      - run: cargo build -p process-execution --release --locked
+      - run: cargo build --workspace --release --locked
       - run: ${{ matrix.binary }} version
+      - run: ${{ matrix.daemon }} version
+      - run: ${{ matrix.gateway }} version
       - uses: actions/upload-artifact@v4
         with:
           name: process-execution-${{ runner.os }}-${{ runner.arch }}
           path: ${{ matrix.binary }}
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: process-execution-host-daemon-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ matrix.daemon }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: execution-gateway-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ matrix.gateway }}
+          if-no-files-found: error
+
+  gateway-database:
+    name: Gateway PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: gateway_test
+          POSTGRES_PASSWORD: gateway_test
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway_test -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --bins --locked
+      - run: cargo test -p execution-gateway --test gateway --locked -- --ignored
+        env:
+          TEST_DATABASE_URL: postgres://gateway_test:gateway_test@localhost:5432/postgres
 
   required:
     name: CI passed
     if: always()
-    needs: [format, platform]
+    needs: [format, platform, gateway-database]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -71,4 +114,5 @@ jobs:
         env:
           FORMAT_RESULT: ${{ needs.format.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
-        run: test "$FORMAT_RESULT" = success && test "$PLATFORM_RESULT" = success
+          GATEWAY_DATABASE_RESULT: ${{ needs.gateway-database.result }}
+        run: test "$FORMAT_RESULT" = success && test "$PLATFORM_RESULT" = success && test "$GATEWAY_DATABASE_RESULT" = success
