@@ -48,7 +48,7 @@ impl Store {
 
     pub fn credential(&self) -> Result<Credential> {
         let file = File::open(self.directory.join("credential.json"))
-            .map_err(|_| "host is not configured; run configure first")?;
+            .map_err(|_| "machine is not configured; run register first")?;
         let credential: Credential = serde_json::from_reader(file)?;
         validate_token(&credential.token)?;
         Ok(credential)

@@ -52,7 +52,7 @@ pub fn gateway_url(value: &str, allow_insecure_loopback: bool) -> Result<Url> {
 
 pub fn websocket_url(gateway: &Url, host_id: Uuid) -> Url {
     let mut url = gateway
-        .join(&format!("v1/hosts/{host_id}/connect"))
+        .join(&format!("v1/machines/{host_id}/connect"))
         .expect("fixed relative URL");
     url.set_scheme(if gateway.scheme() == "https" {
         "wss"

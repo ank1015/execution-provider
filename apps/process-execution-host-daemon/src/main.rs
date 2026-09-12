@@ -1,5 +1,7 @@
 mod config;
 mod connection;
+mod receipts;
+mod registration;
 mod store;
 #[cfg(windows)]
 mod windows;
@@ -31,11 +33,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Exchange a single-use registration token from stdin for a machine credential.
+    Register {
+        #[arg(long)]
+        gateway_url: String,
+        #[arg(long)]
+        machine_id: Uuid,
+        #[arg(long)]
+        allow_insecure_loopback: bool,
+    },
     /// Store a gateway-issued host credential read from one line of stdin.
     Configure {
         #[arg(long)]
         gateway_url: String,
-        #[arg(long)]
+        #[arg(long = "machine-id", alias = "host-id")]
         host_id: Uuid,
         #[arg(long)]
         allow_insecure_loopback: bool,
@@ -88,20 +99,31 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     }
     let store = store::Store::open(directory)?;
     match cli.command {
+        Command::Register {
+            gateway_url,
+            machine_id,
+            allow_insecure_loopback,
+        } => {
+            let gateway = config::gateway_url(&gateway_url, allow_insecure_loopback)?;
+            let token = read_token()?;
+            registration::register(&store, &gateway, machine_id, &token).await?;
+            println!(
+                "{}",
+                serde_json::json!({"configured": true, "machineId": machine_id, "gatewayUrl": gateway.as_str()})
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Configure {
             gateway_url,
             host_id,
             allow_insecure_loopback,
         } => {
             let gateway = config::gateway_url(&gateway_url, allow_insecure_loopback)?;
-            let mut token = String::new();
-            io::stdin().lock().take(8193).read_line(&mut token)?;
-            let token = token.trim_end_matches(['\r', '\n']);
-            store::validate_token(token)?;
+            let token = read_token()?;
             store.configure(&store::Credential {
                 gateway_url: gateway.to_string(),
                 host_id,
-                token: token.to_owned(),
+                token,
             })?;
             println!(
                 "{}",
@@ -161,4 +183,12 @@ async fn shutdown_signal() -> io::Result<()> {
     {
         tokio::signal::ctrl_c().await
     }
+}
+
+fn read_token() -> Result<String> {
+    let mut token = String::new();
+    io::stdin().lock().take(8193).read_line(&mut token)?;
+    let token = token.trim_end_matches(['\r', '\n']);
+    store::validate_token(token)?;
+    Ok(token.to_owned())
 }

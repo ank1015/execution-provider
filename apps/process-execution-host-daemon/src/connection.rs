@@ -1,6 +1,7 @@
 use crate::{
     Result,
     config::{self, CONNECT_TIMEOUT, MAX_REQUESTS, WRITE_TIMEOUT},
+    receipts::{Admission, Receipts},
     store::{Credential, Store},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -10,7 +11,12 @@ use process_execution_protocol::{
     gateway::{DisconnectCode, GATEWAY_PROTOCOL_VERSION, GatewayMessage, HostMessage},
 };
 use serde_json::Value;
-use std::time::{Duration, Instant, SystemTime};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime},
+};
 use tokio::{
     sync::mpsc,
     task::{JoinHandle, JoinSet},
@@ -34,6 +40,7 @@ pub struct Runner {
     dispatcher: Dispatcher,
     requests: JoinSet<()>,
     binary: Value,
+    receipts: Arc<Mutex<Receipts>>,
 }
 
 impl Runner {
@@ -43,6 +50,7 @@ impl Runner {
             runtime,
             requests: JoinSet::new(),
             binary,
+            receipts: Arc::new(Mutex::new(Receipts::default())),
         }
     }
 
@@ -135,6 +143,7 @@ impl Runner {
             host_id: credential.host_id,
             runtime: self.runtime.runtime_info(),
             binary: self.binary.clone(),
+            request_recovery: true,
         };
         timeout(
             WRITE_TIMEOUT,
@@ -149,12 +158,13 @@ impl Runner {
         let Message::Text(welcome) = welcome else {
             return Err("expected gateway welcome".into());
         };
-        let interval = match serde_json::from_str::<GatewayMessage>(&welcome)
+        let (interval, recovery) = match serde_json::from_str::<GatewayMessage>(&welcome)
             .map_err(|_| "invalid gateway welcome")?
         {
             GatewayMessage::Welcome {
                 protocol_version,
                 heartbeat_interval_ms,
+                request_recovery,
                 ..
             } => {
                 if protocol_version != GATEWAY_PROTOCOL_VERSION {
@@ -163,7 +173,10 @@ impl Runner {
                 if !(50..=60_000).contains(&heartbeat_interval_ms) {
                     return Err("heartbeat interval must be between 50 and 60000 ms".into());
                 }
-                Duration::from_millis(heartbeat_interval_ms)
+                (
+                    Duration::from_millis(heartbeat_interval_ms),
+                    request_recovery,
+                )
             }
             GatewayMessage::Disconnect { code } => return Ok(disconnect(code)),
             _ => return Err("expected gateway welcome".into()),
@@ -182,6 +195,9 @@ impl Runner {
         let mut heartbeat = tokio::time::interval(interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut liveness = Liveness::new();
+        let mut responses = tokio::time::interval(Duration::from_millis(100));
+        responses.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut sent = HashSet::new();
         loop {
             tokio::select! {
                 result = &mut writer.0 => { result??; return Ok(End::Retry); }
@@ -191,6 +207,13 @@ impl Runner {
                     }
                     outgoing.try_send(Message::Ping(Vec::new().into())).map_err(|_| "gateway output queue is full")?;
                 }
+                _ = responses.tick(), if recovery => {
+                    let next = self.receipts.lock().unwrap().next_response(&sent);
+                    if let Some((id, text)) = next {
+                        outgoing.try_send(Message::Text(text.as_ref().into())).map_err(|_| "gateway output queue is full")?;
+                        sent.insert(id);
+                    }
+                }
                 Some(result) = self.requests.join_next() => { result?; }
                 message = incoming.next() => {
                     let Some(message) = message else { return Ok(End::Retry); };
@@ -199,7 +222,9 @@ impl Runner {
                             match serde_json::from_str::<GatewayMessage>(&text) {
                                 Ok(GatewayMessage::Request { request }) => {
                                     liveness.touch();
-                                    if self.requests.len() >= MAX_REQUESTS {
+                                    if recovery {
+                                        self.accept(*request, &outgoing)?;
+                                    } else if self.requests.len() >= MAX_REQUESTS {
                                         let response = Response::new(Some(request.request_id), self.dispatcher.generation_id(),
                                             Err(process_execution_core::Error { code: process_execution_core::ErrorCode::ResourceLimit, message: "host request capacity reached".into() }));
                                         outgoing.try_send(response_message(&response)?).map_err(|_| "gateway output queue is full")?;
@@ -214,6 +239,20 @@ impl Runner {
                                         });
                                     }
                                 }
+                                Ok(GatewayMessage::Recover { request_id, generation_id }) if recovery => {
+                                    liveness.touch();
+                                    let message = self.receipt_message(&request_id, generation_id)?;
+                                    outgoing.try_send(message).map_err(|_| "gateway output queue is full")?;
+                                    sent.remove(&request_id);
+                                }
+                                Ok(GatewayMessage::Acknowledge { request_id, generation_id }) if recovery => {
+                                    liveness.touch();
+                                    if generation_id == self.dispatcher.generation_id() {
+                                        self.receipts.lock().unwrap().acknowledge(&request_id);
+                                        sent.remove(&request_id);
+                                    }
+                                }
+                                Ok(GatewayMessage::Recover { .. } | GatewayMessage::Acknowledge { .. }) => return Err("request recovery was not negotiated".into()),
                                 Ok(GatewayMessage::Disconnect { code }) => return Ok(disconnect(code)),
                                 Ok(GatewayMessage::Welcome { .. }) => return Err("duplicate gateway welcome".into()),
                                 Err(_) => {
@@ -234,6 +273,75 @@ impl Runner {
                     }
                 }
             }
+        }
+    }
+
+    fn accept(
+        &mut self,
+        request: protocol::Request,
+        outgoing: &mpsc::Sender<Message>,
+    ) -> Result<()> {
+        let id = request.request_id.clone();
+        if id.is_empty() || id.len() > 256 {
+            return Err("invalid request identity".into());
+        }
+        let fingerprint =
+            Sha256::digest(serde_json::to_vec(&serde_json::to_value(&request)?)?).into();
+        let admission = self.receipts.lock().unwrap().accept(
+            &id,
+            fingerprint,
+            self.requests.len() >= MAX_REQUESTS,
+        );
+        let message = match admission {
+            Admission::New => {
+                let dispatcher = self.dispatcher.clone();
+                let receipts = self.receipts.clone();
+                let task_id = id.clone();
+                // The task and its result belong to this runtime, not its socket.
+                self.requests.spawn(async move {
+                    let response = dispatcher.dispatch(request).await;
+                    let text = response_text(&response).expect("protocol response is serializable");
+                    receipts.lock().unwrap().complete(&task_id, text);
+                });
+                encode_host(&HostMessage::Accepted {
+                    request_id: id,
+                    generation_id: self.dispatcher.generation_id(),
+                })?
+            }
+            Admission::Existing => self.receipt_message(&id, self.dispatcher.generation_id())?,
+            Admission::Conflict => {
+                return Err("request identity was reused with different input".into());
+            }
+            Admission::Full => response_message(&Response::new(
+                Some(id),
+                self.dispatcher.generation_id(),
+                Err(process_execution_core::Error {
+                    code: process_execution_core::ErrorCode::ResourceLimit,
+                    message: "host request or receipt capacity reached".into(),
+                }),
+            ))?,
+        };
+        outgoing
+            .try_send(message)
+            .map_err(|_| "gateway output queue is full")?;
+        Ok(())
+    }
+
+    fn receipt_message(&self, id: &str, generation: Uuid) -> Result<Message> {
+        let receipts = self.receipts.lock().unwrap();
+        if generation == self.dispatcher.generation_id() && receipts.contains(id) {
+            if let Some(text) = receipts.response(id) {
+                return Ok(Message::Text(text.as_ref().into()));
+            }
+            encode_host(&HostMessage::Accepted {
+                request_id: id.to_owned(),
+                generation_id: generation,
+            })
+        } else {
+            encode_host(&HostMessage::Missing {
+                request_id: id.to_owned(),
+                generation_id: self.dispatcher.generation_id(),
+            })
         }
     }
 
@@ -284,7 +392,15 @@ fn disconnect(code: DisconnectCode) -> End {
     }
 }
 
+fn encode_host(message: &HostMessage) -> Result<Message> {
+    Ok(Message::Text(serde_json::to_string(message)?.into()))
+}
+
 fn response_message(response: &Response) -> Result<Message> {
+    Ok(Message::Text(response_text(response)?.into()))
+}
+
+fn response_text(response: &Response) -> Result<String> {
     let frame = protocol::encode_response(response)?;
     let mut value: Value = serde_json::from_slice(&frame)?;
     let mut text =
@@ -300,7 +416,7 @@ fn response_message(response: &Response) -> Result<Message> {
         ))?;
         text = serde_json::to_string(&serde_json::json!({"type": "response", "response": value}))?;
     }
-    Ok(Message::Text(text.into()))
+    Ok(text)
 }
 
 #[cfg(test)]
