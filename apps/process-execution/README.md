@@ -18,14 +18,14 @@ The executable is `target/release/process-execution` on Linux/macOS, or
 architecture.
 
 Merges to `main` that affect either execution binary publish Linux x86-64, Windows
-x86-64, and universal macOS archives to the private Cloud Storage bucket
-`gs://execution-provider-releases-361197090477`. Immutable releases live under
+x86-64, and universal macOS archives at `https://downloads.acentric.dev`.
+Immutable releases live under
 `releases/COMMIT_SHA/`; `latest/` points to the newest release. Each directory has
 SHA-256 checksums and a JSON manifest. For example:
 
 ```sh
-gcloud storage cp gs://execution-provider-releases-361197090477/latest/process-execution-linux-x86_64.tar.gz .
-gcloud storage cp gs://execution-provider-releases-361197090477/latest/checksums.sha256 .
+curl --fail --remote-name https://downloads.acentric.dev/latest/process-execution-linux-x86_64.tar.gz
+curl --fail --remote-name https://downloads.acentric.dev/latest/checksums.sha256
 sha256sum --check --ignore-missing checksums.sha256
 tar -xzf process-execution-linux-x86_64.tar.gz
 ```

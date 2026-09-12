@@ -27,6 +27,7 @@ permissions:
 
 env:
   RELEASE_BUCKET: execution-provider-releases-361197090477
+  DOWNLOAD_BASE_URL: https://downloads.acentric.dev
 
 jobs:
   build:
@@ -145,16 +146,18 @@ jobs:
                 --arg name "$file" \
                 --arg sha256 "$sha256" \
                 --arg uri "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/$file" \
+                --arg url "$DOWNLOAD_BASE_URL/releases/$GITHUB_SHA/$file" \
                 --argjson sizeBytes "$size" \
-                '{name: $name, sha256: $sha256, sizeBytes: $sizeBytes, uri: $uri}'
+                '{name: $name, sha256: $sha256, sizeBytes: $sizeBytes, uri: $uri, url: $url}'
             done | jq -s .
           )"
           jq -n \
             --arg commit "$GITHUB_SHA" \
             --arg createdAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg bucket "gs://$RELEASE_BUCKET" \
+            --arg downloadBaseUrl "$DOWNLOAD_BASE_URL" \
             --argjson artifacts "$artifacts_json" \
-            '{commit: $commit, createdAt: $createdAt, bucket: $bucket, artifacts: $artifacts}' \
+            '{commit: $commit, createdAt: $createdAt, bucket: $bucket, downloadBaseUrl: $downloadBaseUrl, artifacts: $artifacts}' \
             > manifest.json
 
       - name: Authenticate to Google Cloud
