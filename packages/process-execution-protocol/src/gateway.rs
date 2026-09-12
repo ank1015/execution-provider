@@ -1,4 +1,4 @@
-//! Initial gateway handshake contract. Registration remains gateway-specific.
+//! Machine registration and negotiated gateway transport contract.
 use crate::{Request, Response, VERSION};
 use process_execution_core::RuntimeInfo;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,16 @@ pub enum HostMessage {
         host_id: Uuid,
         runtime: RuntimeInfo,
         binary: Value,
+        #[serde(default)]
+        request_recovery: bool,
+    },
+    Accepted {
+        request_id: String,
+        generation_id: Uuid,
+    },
+    Missing {
+        request_id: String,
+        generation_id: Uuid,
     },
     Response {
         response: Box<Response>,
@@ -29,9 +39,19 @@ pub enum GatewayMessage {
         protocol_version: u32,
         connection_id: Uuid,
         heartbeat_interval_ms: u64,
+        #[serde(default)]
+        request_recovery: bool,
     },
     Request {
         request: Box<Request>,
+    },
+    Recover {
+        request_id: String,
+        generation_id: Uuid,
+    },
+    Acknowledge {
+        request_id: String,
+        generation_id: Uuid,
     },
     Disconnect {
         code: DisconnectCode,
@@ -45,4 +65,17 @@ pub enum DisconnectCode {
     Revoked,
     Replaced,
     IncompatibleProtocol,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationRequest {
+    pub installation_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationResponse {
+    pub machine_id: Uuid,
+    pub credential: String,
 }
