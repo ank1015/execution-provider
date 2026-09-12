@@ -27,6 +27,14 @@ This repository is a Cargo workspace for multiple Rust applications and reusable
   registration and command routing, durable operation/batch jobs, PostgreSQL
   persistence, and signed job-result webhooks.
 
+## Binary releases
+
+Changes to either execution binary on `main` publish Linux x86-64, Windows x86-64,
+and universal macOS archives to
+`gs://execution-provider-releases-361197090477`. Releases are private and available
+through authenticated Cloud Storage access. Each release includes SHA-256 checksums
+and a JSON manifest under both an immutable `releases/COMMIT_SHA/` path and `latest/`.
+
 Create a new application:
 
 ```sh
