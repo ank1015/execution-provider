@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
     branches: [main]
   merge_group:
@@ -20,8 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -50,11 +51,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
       - run: cargo run -p process-execution-core --example run --locked
@@ -62,21 +63,6 @@ jobs:
       - run: ${{ matrix.binary }} version
       - run: ${{ matrix.daemon }} version
       - run: ${{ matrix.gateway }} version
-      - uses: actions/upload-artifact@v4
-        with:
-          name: process-execution-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ matrix.binary }}
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: process-execution-host-daemon-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ matrix.daemon }}
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: execution-gateway-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ matrix.gateway }}
-          if-no-files-found: error
 
   gateway-database:
     name: Gateway PostgreSQL integration
@@ -95,9 +81,9 @@ jobs:
           --health-cmd "pg_isready -U gateway_test -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --workspace --bins --locked
       - run: cargo test -p execution-gateway --test gateway --locked -- --ignored
         env:

@@ -49,13 +49,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Build Linux binaries
         if: runner.os == 'Linux'
@@ -112,14 +112,14 @@ jobs:
           Compress-Archive -Path dist\process-execution-host-daemon\process-execution-host-daemon.exe -DestinationPath dist\process-execution-host-daemon-windows-x86_64.zip
 
       - name: Upload packaged binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: |
             dist/*.tar.gz
             dist/*.zip
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
 
   publish:
     name: Publish to Cloud Storage
@@ -128,7 +128,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download packaged binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: execution-binaries-*
           path: dist
@@ -161,13 +161,13 @@ jobs:
             > manifest.json
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: projects/361197090477/locations/global/workloadIdentityPools/github-actions/providers/execution-provider
           service_account: execution-release-publisher@project-2c02a9f6-1ff5-461d-ae0.iam.gserviceaccount.com
 
       - name: Set up Google Cloud CLI
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
       - name: Publish immutable release
         run: |
