@@ -327,6 +327,9 @@ pub async fn finish_tx(
     .bind(retention)
     .execute(&mut **tx)
     .await?;
+    if callback.is_empty() {
+        return Ok(());
+    }
     let event = Uuid::new_v4();
     let event_type = format!("job.{status}");
     let payload = json!({"eventId": event, "type": event_type, "jobId": id, "machineId": machine, "completedAt": finished, "response": response, "error": error});

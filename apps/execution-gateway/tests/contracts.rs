@@ -51,6 +51,7 @@ fn secrets_are_random_and_encryption_is_bound_to_owner() {
 
 #[test]
 fn callback_configuration_does_not_allow_credentials_or_insecure_urls() {
+    assert_eq!(config::callback_setting("").unwrap(), "");
     assert!(config::callback_url("https://callback.example/events").is_ok());
     for value in [
         "http://localhost/events",

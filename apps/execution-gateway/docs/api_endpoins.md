@@ -41,7 +41,7 @@ Authentication: deployment-level **admin key**.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| POST | `/v1/admin/users` | Create a user with name and callback URL; issue the initial user key and webhook secret. |
+| POST | `/v1/admin/users` | Create a user with a name and optional callback URL; issue the initial user key and webhook secret. |
 | GET | `/v1/admin/users` | List users. |
 | GET | `/v1/admin/users/:userId` | Get user details. |
 | PATCH | `/v1/admin/users/:userId` | Update name, callback URL, or enabled status. |
@@ -53,6 +53,7 @@ User creation and initial key creation are atomic. Issuing another key does not
 automatically revoke existing keys. Disabling a user blocks subsequent access
 and dispatch of new work; enabling restores access through unrevoked user keys.
 Revoking one user key does not revoke the user's other keys or machine credentials.
+An empty `callbackUrl` disables webhook creation for future job results.
 
 ## 2. User: profile and callback settings
 
@@ -260,6 +261,7 @@ Authentication: **user API key**.
 
 Events are `job.succeeded`, `job.failed`, and `job.unknown`. A batch produces one
 terminal job event. There is no `execution.finished` event.
+Users with an empty callback URL do not create webhook delivery records.
 
 Send signed notifications to the user's saved callback URL. Include stable event
 and job IDs plus the job outcome. Delivery is at least once: receivers verify

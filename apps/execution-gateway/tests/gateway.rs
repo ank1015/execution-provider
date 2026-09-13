@@ -566,6 +566,17 @@ async fn api_registration_jobs_and_isolation() {
     assert!(!list.to_string().contains(&credential));
     assert!(list["data"][0].get("credentialHash").is_none());
 
+    let profile = gateway
+        .request(
+            Method::PATCH,
+            "/v1/me",
+            &key,
+            Some(json!({"callbackUrl":""})),
+        )
+        .await;
+    assert_eq!(profile.0, 200);
+    assert_eq!(profile.1["callbackUrl"], "");
+
     let input = json!({"mode":"parallel","operations":[{"request_id":"one","operation":"runtime.info"},{"request_id":"two","operation":"execution.list","params":{}}]});
     let futures = (0..8).map(|_| gateway.job(&key, machine, "batch", input.clone()));
     let ids = futures_util::future::join_all(futures).await;
@@ -591,11 +602,30 @@ async fn api_registration_jobs_and_isolation() {
             .0,
         404
     );
+    let deliveries = gateway
+        .request(
+            Method::GET,
+            &format!("/v1/webhook-deliveries?jobId={}", ids[0]),
+            &key,
+            None,
+        )
+        .await
+        .1;
+    assert!(deliveries["data"].as_array().unwrap().is_empty());
     let conflict = gateway.request(Method::POST, "/v1/jobs", &key, Some(json!({"machineId":machine,"idempotencyKey":"batch","request":{"operation":"runtime.info"}}))).await;
     assert_eq!(conflict.0, 409);
     let bad_generation = gateway.request(Method::POST, "/v1/jobs", &key, Some(json!({"machineId":machine,"idempotencyKey":"old","request":{"operation":"runtime.info","expected_generation_id":Uuid::new_v4()}}))).await;
     assert_eq!(bad_generation.1["error"]["code"], "generation_mismatch");
     assert_eq!(gateway.request(Method::POST, "/v1/jobs", &key, Some(json!({"machineId":machine,"idempotencyKey":"shutdown","request":{"operation":"runtime.shutdown"}}))).await.0, 400);
+
+    gateway
+        .request(
+            Method::PATCH,
+            "/v1/me",
+            &key,
+            Some(json!({"callbackUrl":"https://callback.example/events"})),
+        )
+        .await;
 
     let running = gateway.job(&key, machine, "start", json!({"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}})).await;
     let request = socket.request().await;
@@ -654,7 +684,7 @@ async fn api_registration_jobs_and_isolation() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(rows, 1);
+    assert_eq!(rows, 0);
 
     assert_eq!(
         gateway

@@ -57,7 +57,7 @@ It can own multiple API keys, machines, and jobs.
 | `id` | uuid | Primary key |
 | `name` | text | Display name |
 | `enabled` | boolean | Whether the user can access the service |
-| `callback_url` | text | Registered job notification destination |
+| `callback_url` | text | Registered job notification destination; empty disables webhooks |
 | `webhook_secret_encrypted` | bytea | Encrypted signing secret |
 | `created_at` | timestamptz | Creation time |
 | `updated_at` | timestamptz | Last settings change |
