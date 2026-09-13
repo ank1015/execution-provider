@@ -4,9 +4,10 @@ A foreground host daemon for Linux, macOS, and Windows. It runs as the local use
 account, embeds `process-execution-core`, and maintains an authenticated outbound
 WebSocket to an execution gateway. It opens no inbound network server.
 
-The built-in gateway URL is unset. Register this installation with the execution
-gateway before running it. The gateway issues a machine credential, which the daemon
-stores privately and uses for subsequent connections.
+The default gateway is `https://execution.acentric.dev`. Register this installation
+before running it. The gateway issues a machine credential, which the daemon stores
+privately and uses for subsequent connections. Use `--gateway-url` during registration
+to connect to a different deployment.
 
 ## Install and configure
 
@@ -37,7 +38,6 @@ machine ID and single-use registration token to the daemon, then run:
 
 ```sh
 process-execution-host-daemon register \
-  --gateway-url https://gateway.example.com \
   --machine-id 00000000-0000-0000-0000-000000000001 < /path/to/private-token.txt
 process-execution-host-daemon run
 ```
@@ -52,7 +52,6 @@ PowerShell can provide the same input:
 
 ```powershell
 Get-Content -Raw C:\private\token.txt | process-execution-host-daemon.exe register `
-  --gateway-url https://gateway.example.com `
   --machine-id 00000000-0000-0000-0000-000000000001
 process-execution-host-daemon.exe run
 ```
@@ -70,8 +69,8 @@ fallback to an unrelated server.
 
 | Command | Purpose |
 |---|---|
-| `register --gateway-url URL --machine-id UUID` | Exchange the registration token from stdin and save the machine credential |
-| `configure --gateway-url URL --machine-id UUID` | Save an already-issued machine credential from stdin (`--host-id` remains an alias) |
+| `register [--gateway-url URL] --machine-id UUID` | Exchange the registration token from stdin and save the machine credential |
+| `configure [--gateway-url URL] --machine-id UUID` | Save an already-issued machine credential from stdin (`--host-id` remains an alias) |
 | `run [--gateway-url URL] [--config FILE]` | Maintain the connection and serve execution requests |
 | `status` | Print configuration presence, whether the state lock is held, and the last runtime/connection status |
 | `version` | Print binary, execution protocol, OS, and architecture versions |
@@ -119,7 +118,8 @@ failures exit with code 2; a local Ctrl-C or Unix SIGTERM shuts down cleanly wit
 Fields are optional; unknown fields are rejected. `execution` accepts the same
 configuration as [process-execution](../process-execution/README.md#configuration).
 Relative paths resolve against the daemon's launch directory. The gateway selection
-order is CLI, JSON configuration, then stored registration; no URL is built in.
+order for `run` is CLI, JSON configuration, then stored registration. `register` and
+`configure` default to `https://execution.acentric.dev` when `--gateway-url` is omitted.
 
 For local development, `register`, `configure`, and `run` support `--allow-insecure-loopback`.
 The run configuration can also set `allow_insecure_loopback: true`. This permits HTTP/WS
