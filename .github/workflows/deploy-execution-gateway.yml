@@ -54,13 +54,13 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Verify gateway
         run: |
@@ -71,13 +71,13 @@ jobs:
           TEST_DATABASE_URL: postgres://gateway_test:gateway_test@localhost:5432/postgres
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: projects/361197090477/locations/global/workloadIdentityPools/github-actions/providers/execution-provider
           service_account: execution-gateway-deployer@project-2c02a9f6-1ff5-461d-ae0.iam.gserviceaccount.com
 
       - name: Set up Google Cloud CLI
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
       - name: Authenticate Docker to Artifact Registry
         run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
