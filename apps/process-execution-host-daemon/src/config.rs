@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_REQUESTS: usize = 32;
+pub const DEFAULT_GATEWAY_URL: &str = "https://execution.acentric.dev";
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]

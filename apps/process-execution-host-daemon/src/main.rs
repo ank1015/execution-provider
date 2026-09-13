@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     /// Exchange a single-use registration token from stdin for a machine credential.
     Register {
-        #[arg(long)]
+        #[arg(long, default_value = config::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long)]
         machine_id: Uuid,
@@ -44,7 +44,7 @@ enum Command {
     },
     /// Store a gateway-issued host credential read from one line of stdin.
     Configure {
-        #[arg(long)]
+        #[arg(long, default_value = config::DEFAULT_GATEWAY_URL)]
         gateway_url: String,
         #[arg(long = "machine-id", alias = "host-id")]
         host_id: Uuid,
