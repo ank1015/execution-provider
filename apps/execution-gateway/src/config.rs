@@ -81,6 +81,13 @@ pub fn callback_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
+pub fn callback_setting(value: &str) -> Result<String> {
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(callback_url(value)?.to_string())
+}
+
 pub fn name(value: String) -> Result<String> {
     let value = value.trim().to_owned();
     if value.is_empty() || value.chars().count() > 200 || value.contains('\0') {

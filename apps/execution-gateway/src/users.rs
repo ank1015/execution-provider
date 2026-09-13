@@ -118,7 +118,7 @@ pub async fn create(
     ApiJson(input): ApiJson<Create>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let name = config::name(input.name)?;
-    let callback = config::callback_url(&input.callback_url)?.to_string();
+    let callback = config::callback_setting(&input.callback_url)?;
     let id = Uuid::new_v4();
     let secret = crypto::token("whsec_");
     let encrypted = crypto::encrypt(&state.config.encryption_key, id, &secret)?;
@@ -159,7 +159,7 @@ async fn patch_user(state: &AppState, id: Uuid, input: Update) -> Result<User> {
     let name = input.name.map(config::name).transpose()?;
     let callback = input
         .callback_url
-        .map(|v| config::callback_url(&v).map(|v| v.to_string()))
+        .map(|v| config::callback_setting(&v))
         .transpose()?;
     sqlx::query_as(&format!("UPDATE users SET name=COALESCE($2,name), callback_url=COALESCE($3,callback_url), enabled=COALESCE($4,enabled), updated_at=clock_timestamp() WHERE id=$1 RETURNING {USER_COLUMNS}"))
         .bind(id).bind(name).bind(callback).bind(input.enabled).fetch_optional(&state.pool).await?.ok_or_else(Error::missing)
