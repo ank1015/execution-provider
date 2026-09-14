@@ -11,7 +11,7 @@ use process_execution_protocol::{self as protocol, Operation, Payload, Request, 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{FromRow, Postgres, QueryBuilder, Transaction};
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 use uuid::Uuid;
 
 #[derive(Serialize, FromRow)]
@@ -44,6 +44,35 @@ pub struct Filter {
     idempotency_key: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Wait {
+    timeout_ms: Option<u64>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalJobEventV2 {
+    schema_version: u8,
+    event_id: Uuid,
+    r#type: String,
+    job_id: Uuid,
+    machine_id: Uuid,
+    completed_at: DateTime<Utc>,
+}
+
+const MAX_WAIT_MS: u64 = 5 * 60 * 1000;
+impl Wait {
+    fn timeout(&self) -> Result<Duration> {
+        let timeout = self.timeout_ms.unwrap_or(MAX_WAIT_MS);
+        if !(1..=MAX_WAIT_MS).contains(&timeout) {
+            return Err(Error::invalid("timeoutMs must be between 1 and 300000"));
+        }
+        Ok(Duration::from_millis(timeout))
+    }
+}
+fn terminal(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed" | "unknown")
 }
 
 pub fn normalize(value: Value) -> Result<Value> {
@@ -270,6 +299,41 @@ pub async fn get(
     Extension(UserId(user)): Extension<UserId>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
+    Ok(Json(detail(&state, user, id).await?))
+}
+
+pub async fn wait(
+    State(state): State<AppState>,
+    Extension(UserId(user)): Extension<UserId>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<Wait>,
+) -> Result<Json<Value>> {
+    let timeout = query.timeout()?;
+    if terminal(&status(&state, user, id).await?) {
+        return Ok(Json(detail(&state, user, id).await?));
+    }
+    let mut subscription = state.job_completions.subscribe(user, id).ok_or(Error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "resource_limit",
+        "too many concurrent job waits",
+    ))?;
+    // The second read closes the completion race between the first read and subscription.
+    if !terminal(&status(&state, user, id).await?) {
+        subscription.wait(&state.shutdown, timeout).await;
+    }
+    Ok(Json(detail(&state, user, id).await?))
+}
+
+async fn status(state: &AppState, user: Uuid, id: Uuid) -> Result<String> {
+    sqlx::query_scalar("SELECT status FROM jobs WHERE id=$1 AND user_id=$2")
+        .bind(id)
+        .bind(user)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(Error::missing)
+}
+
+async fn detail(state: &AppState, user: Uuid, id: Uuid) -> Result<Value> {
     let mut tx = state.pool.begin().await?;
     let job: Job = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM jobs WHERE id=$1 AND user_id=$2 FOR SHARE"
@@ -298,7 +362,7 @@ pub async fn get(
     });
     value["request"] = json!(input);
     value["requestExpiresAt"] = json!(expires);
-    Ok(Json(value))
+    Ok(value)
 }
 
 pub async fn finish_tx(
@@ -314,11 +378,12 @@ pub async fn finish_tx(
     let Some((user, machine, finished)) = updated else {
         return Ok(());
     };
-    let callback: String =
-        sqlx::query_scalar("SELECT callback_url FROM users WHERE id=$1 FOR SHARE")
-            .bind(user)
-            .fetch_one(&mut **tx)
-            .await?;
+    let (callback, payload_version): (String, i32) = sqlx::query_as(
+        "SELECT callback_url,webhook_payload_version FROM users WHERE id=$1 FOR SHARE",
+    )
+    .bind(user)
+    .fetch_one(&mut **tx)
+    .await?;
     sqlx::query(
         "UPDATE job_requests SET expires_at=$2 + make_interval(days => $3) WHERE job_id=$1",
     )
@@ -327,15 +392,52 @@ pub async fn finish_tx(
     .bind(retention)
     .execute(&mut **tx)
     .await?;
+    crate::job_completion::publish(tx, id).await?;
     if callback.is_empty() {
         return Ok(());
     }
     let event = Uuid::new_v4();
     let event_type = format!("job.{status}");
-    let payload = json!({"eventId": event, "type": event_type, "jobId": id, "machineId": machine, "completedAt": finished, "response": response, "error": error});
+    let payload = terminal_event(
+        payload_version,
+        event,
+        event_type.clone(),
+        id,
+        machine,
+        finished,
+        &response,
+        &error,
+    )?;
     sqlx::query("INSERT INTO webhook_deliveries(id,job_id,user_id,event_type,callback_url,payload) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(event).bind(id).bind(user).bind(event_type).bind(callback).bind(payload).execute(&mut **tx).await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminal_event(
+    version: i32,
+    event: Uuid,
+    event_type: String,
+    job: Uuid,
+    machine: Uuid,
+    completed: DateTime<Utc>,
+    response: &Option<Value>,
+    error: &Option<Value>,
+) -> Result<Value> {
+    match version {
+        1 => Ok(
+            json!({"eventId": event, "type": event_type, "jobId": job, "machineId": machine, "completedAt": completed, "response": response, "error": error}),
+        ),
+        2 => Ok(serde_json::to_value(TerminalJobEventV2 {
+            schema_version: 2,
+            event_id: event,
+            r#type: event_type,
+            job_id: job,
+            machine_id: machine,
+            completed_at: completed,
+        })?),
+        _ => Err(Error::internal()),
+    }
 }
 pub async fn finish(state: &AppState, id: Uuid, status: &str, error: Value) -> Result<()> {
     let mut tx = state.pool.begin().await?;
@@ -517,4 +619,89 @@ pub async fn housekeeping_once(state: &AppState) -> Result<()> {
     sqlx::query("DELETE FROM job_requests WHERE job_id IN (SELECT r.job_id FROM job_requests r JOIN jobs j ON j.id=r.job_id WHERE r.expires_at<=clock_timestamp() AND j.status IN ('succeeded','failed','unknown') LIMIT 100)")
         .execute(&state.pool).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_WAIT_MS, Wait, terminal_event};
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn job_waits_default_to_five_minutes_and_are_bounded() {
+        assert_eq!(
+            Wait { timeout_ms: None }.timeout().unwrap().as_millis(),
+            u128::from(MAX_WAIT_MS)
+        );
+        assert!(
+            Wait {
+                timeout_ms: Some(1)
+            }
+            .timeout()
+            .is_ok()
+        );
+        assert!(
+            Wait {
+                timeout_ms: Some(MAX_WAIT_MS)
+            }
+            .timeout()
+            .is_ok()
+        );
+        assert!(
+            Wait {
+                timeout_ms: Some(0)
+            }
+            .timeout()
+            .is_err()
+        );
+        assert!(
+            Wait {
+                timeout_ms: Some(MAX_WAIT_MS + 1)
+            }
+            .timeout()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_events_are_versioned_without_breaking_legacy_consumers() {
+        let event = Uuid::new_v4();
+        let job = Uuid::new_v4();
+        let machine = Uuid::new_v4();
+        let completed = Utc::now();
+        let expected_response = json!({"status":"ok"});
+        let response = Some(expected_response.clone());
+        let legacy = terminal_event(
+            1,
+            event,
+            "job.succeeded".into(),
+            job,
+            machine,
+            completed,
+            &response,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(legacy["response"], expected_response);
+        assert!(legacy.get("schemaVersion").is_none());
+
+        let payload = terminal_event(
+            2,
+            event,
+            "job.succeeded".into(),
+            job,
+            machine,
+            completed,
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(payload["eventId"], event.to_string());
+        assert_eq!(payload["jobId"], job.to_string());
+        assert_eq!(payload["machineId"], machine.to_string());
+        assert_eq!(payload["type"], "job.succeeded");
+        assert_eq!(payload["schemaVersion"], 2);
+        assert_eq!(payload.as_object().unwrap().len(), 6);
+    }
 }
