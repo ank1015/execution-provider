@@ -255,7 +255,12 @@ impl Gateway {
         let started = Instant::now();
         loop {
             let (status, value) = self
-                .request(Method::GET, &format!("/v1/jobs/{job}"), key, None)
+                .request(
+                    Method::GET,
+                    &format!("/v1/jobs/{job}/wait?timeoutMs=5000"),
+                    key,
+                    None,
+                )
                 .await;
             assert_eq!(status, 200);
             if ["succeeded", "failed", "unknown"].contains(&value["status"].as_str().unwrap()) {
@@ -585,8 +590,30 @@ async fn api_registration_jobs_and_isolation() {
     assert_eq!(request["request_id"], ids[0].to_string());
     assert_eq!(request["expected_generation_id"], generation.to_string());
     assert_eq!(request["mode"], "parallel");
+    let timed = gateway
+        .request(
+            Method::GET,
+            &format!("/v1/jobs/{}/wait?timeoutMs=20", ids[0]),
+            &key,
+            None,
+        )
+        .await;
+    assert_eq!(timed.0, 200);
+    assert!(["dispatching", "waiting_response"].contains(&timed.1["status"].as_str().unwrap()));
+    let client = gateway.client.clone();
+    let url = format!("{}/v1/jobs/{}/wait?timeoutMs=5000", gateway.base, ids[0]);
+    let wait_key = key.clone();
+    let waiting = tokio::spawn(async move {
+        let response = client.get(url).bearer_auth(wait_key).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        response.json::<Value>().await.unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
     socket.reply(&request, json!({"succeeded":false,"results":[{"request_id":"one","status":"ok","result":{}},{"request_id":"two","status":"error","error":{"code":"invalid_argument","message":"fixture"}}]})).await;
-    let job = gateway.terminal(&key, ids[0]).await;
+    let job = timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(job["status"], "failed");
     assert_eq!(
         job["response"]["result"]["results"]
@@ -602,6 +629,32 @@ async fn api_registration_jobs_and_isolation() {
             .0,
         404
     );
+    assert_eq!(
+        gateway
+            .request(
+                Method::GET,
+                &format!("/v1/jobs/{}/wait?timeoutMs=1", ids[0]),
+                &other,
+                None
+            )
+            .await
+            .0,
+        404
+    );
+    for query in ["timeoutMs=0", "timeoutMs=300001", "extra=1"] {
+        assert_eq!(
+            gateway
+                .request(
+                    Method::GET,
+                    &format!("/v1/jobs/{}/wait?{query}", ids[0]),
+                    &key,
+                    None
+                )
+                .await
+                .0,
+            400
+        );
+    }
     let deliveries = gateway
         .request(
             Method::GET,

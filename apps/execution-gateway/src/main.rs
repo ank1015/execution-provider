@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use execution_gateway::{AppState, config::Config, db, jobs, router, webhooks};
+use execution_gateway::{AppState, config::Config, db, job_completion, jobs, router, webhooks};
 use sqlx::{Connection, Executor, PgConnection};
 use std::{process::ExitCode, time::Duration};
 
@@ -79,6 +79,13 @@ async fn run(cli: Cli) -> Result<(), &'static str> {
     jobs::recover_inflight(&state)
         .await
         .map_err(|_| "job recovery failed; apply migrations before serving")?;
+    let completions = job_completion::start(
+        state.pool.clone(),
+        state.job_completions.clone(),
+        state.shutdown.clone(),
+    )
+    .await
+    .map_err(|_| "job completion listener initialization failed")?;
     eprintln!(
         "execution-gateway listening on {}",
         listener
@@ -126,7 +133,8 @@ async fn run(cli: Cli) -> Result<(), &'static str> {
         }
         let maintenance_ok = maintenance.await.is_ok();
         let webhook_ok = webhook.await.is_ok();
-        server_ok && maintenance_ok && webhook_ok
+        let completions_ok = completions.await.is_ok();
+        server_ok && maintenance_ok && webhook_ok && completions_ok
     })
     .await;
     // Hold ownership until admission, sockets and workers have stopped.

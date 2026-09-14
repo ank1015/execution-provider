@@ -3,6 +3,7 @@ pub mod connections;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod job_completion;
 pub mod jobs;
 pub mod machines;
 pub mod users;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub connections: Arc<connections::Connections>,
+    pub job_completions: Arc<job_completion::JobCompletions>,
     pub http: reqwest::Client,
     pub shutdown: CancellationToken,
 }
@@ -46,6 +48,7 @@ impl AppState {
             pool,
             config: Arc::new(config),
             connections: Arc::new(connections::Connections::default()),
+            job_completions: Arc::new(job_completion::JobCompletions::default()),
             http,
             shutdown: CancellationToken::new(),
         })
@@ -188,6 +191,7 @@ pub fn router(state: AppState) -> Router {
     let jobs = Router::new()
         .route("/v1/jobs", post(jobs::submit).get(jobs::list))
         .route("/v1/jobs/{job}", get(jobs::get))
+        .route("/v1/jobs/{job}/wait", get(jobs::wait))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             users::user_auth,
