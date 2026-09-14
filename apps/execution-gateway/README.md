@@ -3,14 +3,14 @@
 Rust HTTP/WebSocket gateway for user-owned machines and durable execution jobs.
 It provides admin-created users, scoped API keys, machine registration, single
 operations and batches through one job endpoint, retained responses, and signed
-job-result webhooks. PostgreSQL is the durable store and queue.
+lightweight job-result webhooks. PostgreSQL is the durable store and queue.
 
 The gateway does not monitor command completion after an operation returns.
 For example, a successful `execution.start` job may contain a running execution
 handle. The caller submits `execution.observe` later when it wants more output.
 
-- [API endpoints and payloads](docs/api_endpoins.md)
-- [Database schemas and consistency](docs/db_schemas.md)
+- [API reference](docs/api-reference.md)
+- [Architecture](docs/architecture.md)
 - [Shared execution protocol](../../packages/process-execution-protocol/README.md)
 
 ## Build and run
@@ -61,8 +61,9 @@ egress controls. No external LLM or sandbox provider is required.
 ## Processes and deployment
 
 Run one `serve` process per database. It owns the HTTP API, machine sockets,
-dispatch tasks, input cleanup, and an independent webhook delivery loop. A
-dedicated PostgreSQL session advisory lock rejects a second gateway instance.
+dispatch tasks, input cleanup, terminal-job listener, and an independent webhook
+delivery loop. A dedicated PostgreSQL session advisory lock rejects a second gateway
+instance.
 Loss of that ownership connection shuts down serving. Multi-instance routing
 is not implemented.
 
@@ -105,8 +106,9 @@ leases expire; duplicate delivery remains possible.
 
 Database connections have five-second acquisition/statement limits, three-second
 lock waits, and a 30-second idle-transaction limit. The pool has ten connections,
-plus the dedicated ownership connection. There are no database transactions held
-while waiting for execution results or sending callbacks.
+one of which is reserved by the terminal-job listener, plus the dedicated ownership
+connection. Bounded wait requests retain neither a database transaction nor a pool
+connection. No transaction is held while awaiting daemon results or sending callbacks.
 
 ## Current daemon compatibility
 
@@ -157,6 +159,7 @@ ordinary connection loss do not revoke the machine.
 - Up to 256 outstanding jobs per user and 32 dispatched requests per machine.
 - Batches: 1–32 operations; parallel batches run up to eight operations at once.
 - Handshake/write timeout: ten seconds. Heartbeat: 15 seconds; liveness: 45 seconds.
+- Bounded job-result wait: five minutes maximum.
 - Registration token lifetime: 15 minutes, single-use.
 - Job input expires seven days after completion by default. Expired input is
   hidden immediately and cleaned in bounded batches.
