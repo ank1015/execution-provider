@@ -311,7 +311,11 @@ pub async fn wait(
     if terminal(&status(&state, user, id).await?) {
         return Ok(Json(detail(&state, user, id).await?));
     }
-    let mut subscription = state.job_completions.subscribe(id);
+    let mut subscription = state.job_completions.subscribe(user, id).ok_or(Error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "resource_limit",
+        "too many concurrent job waits",
+    ))?;
     // The second read closes the completion race between the first read and subscription.
     if !terminal(&status(&state, user, id).await?) {
         subscription.wait(&state.shutdown, timeout).await;

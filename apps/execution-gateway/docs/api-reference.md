@@ -433,7 +433,9 @@ the outcome.
 the request waits for terminal state or the timeout and then returns exactly the same
 representation as job detail. A timeout is not an error: the response is `200` with the
 current `queued`, `dispatching`, or `waiting_response` state, and the caller may wait
-again. Waiters retain neither a database transaction nor a pool connection.
+again. Waiters retain neither a database transaction nor a pool connection. The gateway
+allows up to 64 concurrent waits per user and 1,024 across the process; excess waits
+return `429 resource_limit`.
 
 A successful daemon response has this envelope:
 

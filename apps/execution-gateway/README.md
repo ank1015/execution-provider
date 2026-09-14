@@ -160,6 +160,7 @@ ordinary connection loss do not revoke the machine.
 - Batches: 1–32 operations; parallel batches run up to eight operations at once.
 - Handshake/write timeout: ten seconds. Heartbeat: 15 seconds; liveness: 45 seconds.
 - Bounded job-result wait: five minutes maximum.
+- Concurrent job-result waits: 64 per user and 1,024 per gateway process.
 - Registration token lifetime: 15 minutes, single-use.
 - Job input expires seven days after completion by default. Expired input is
   hidden immediately and cleaned in bounded batches.

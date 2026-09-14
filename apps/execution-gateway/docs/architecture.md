@@ -380,6 +380,7 @@ The principal limits are:
 | Queued dispatch deadline | 30 seconds |
 | Disconnected response-recovery window | 24 hours |
 | Bounded job wait | 5 minutes |
+| Concurrent job waits | 64 per user; 1,024 per gateway process |
 | Default completed-input retention | 7 days |
 
 Input cleanup removes only `job_requests`. Job metadata, fingerprints, responses,
