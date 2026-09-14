@@ -52,7 +52,8 @@ pub struct Wait {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TerminalJobEvent {
+struct TerminalJobEventV2 {
+    schema_version: u8,
     event_id: Uuid,
     r#type: String,
     job_id: Uuid,
@@ -377,11 +378,12 @@ pub async fn finish_tx(
     let Some((user, machine, finished)) = updated else {
         return Ok(());
     };
-    let callback: String =
-        sqlx::query_scalar("SELECT callback_url FROM users WHERE id=$1 FOR SHARE")
-            .bind(user)
-            .fetch_one(&mut **tx)
-            .await?;
+    let (callback, payload_version): (String, i32) = sqlx::query_as(
+        "SELECT callback_url,webhook_payload_version FROM users WHERE id=$1 FOR SHARE",
+    )
+    .bind(user)
+    .fetch_one(&mut **tx)
+    .await?;
     sqlx::query(
         "UPDATE job_requests SET expires_at=$2 + make_interval(days => $3) WHERE job_id=$1",
     )
@@ -396,10 +398,46 @@ pub async fn finish_tx(
     }
     let event = Uuid::new_v4();
     let event_type = format!("job.{status}");
-    let payload = json!({"eventId": event, "type": event_type, "jobId": id, "machineId": machine, "completedAt": finished, "response": response, "error": error});
+    let payload = terminal_event(
+        payload_version,
+        event,
+        event_type.clone(),
+        id,
+        machine,
+        finished,
+        &response,
+        &error,
+    )?;
     sqlx::query("INSERT INTO webhook_deliveries(id,job_id,user_id,event_type,callback_url,payload) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(event).bind(id).bind(user).bind(event_type).bind(callback).bind(payload).execute(&mut **tx).await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminal_event(
+    version: i32,
+    event: Uuid,
+    event_type: String,
+    job: Uuid,
+    machine: Uuid,
+    completed: DateTime<Utc>,
+    response: &Option<Value>,
+    error: &Option<Value>,
+) -> Result<Value> {
+    match version {
+        1 => Ok(
+            json!({"eventId": event, "type": event_type, "jobId": job, "machineId": machine, "completedAt": completed, "response": response, "error": error}),
+        ),
+        2 => Ok(serde_json::to_value(TerminalJobEventV2 {
+            schema_version: 2,
+            event_id: event,
+            r#type: event_type,
+            job_id: job,
+            machine_id: machine,
+            completed_at: completed,
+        })?),
+        _ => Err(Error::internal()),
+    }
 }
 pub async fn finish(state: &AppState, id: Uuid, status: &str, error: Value) -> Result<()> {
     let mut tx = state.pool.begin().await?;
@@ -585,9 +623,9 @@ pub async fn housekeeping_once(state: &AppState) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WAIT_MS, TerminalJobEvent, Wait};
+    use super::{MAX_WAIT_MS, Wait, terminal_event};
     use chrono::Utc;
-    use serde_json::to_value;
+    use serde_json::json;
     use uuid::Uuid;
 
     #[test]
@@ -627,22 +665,43 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_contain_only_routing_metadata() {
+    fn terminal_events_are_versioned_without_breaking_legacy_consumers() {
         let event = Uuid::new_v4();
         let job = Uuid::new_v4();
         let machine = Uuid::new_v4();
-        let payload = to_value(TerminalJobEvent {
-            event_id: event,
-            r#type: "job.succeeded".into(),
-            job_id: job,
-            machine_id: machine,
-            completed_at: Utc::now(),
-        })
+        let completed = Utc::now();
+        let expected_response = json!({"status":"ok"});
+        let response = Some(expected_response.clone());
+        let legacy = terminal_event(
+            1,
+            event,
+            "job.succeeded".into(),
+            job,
+            machine,
+            completed,
+            &response,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(legacy["response"], expected_response);
+        assert!(legacy.get("schemaVersion").is_none());
+
+        let payload = terminal_event(
+            2,
+            event,
+            "job.succeeded".into(),
+            job,
+            machine,
+            completed,
+            &None,
+            &None,
+        )
         .unwrap();
         assert_eq!(payload["eventId"], event.to_string());
         assert_eq!(payload["jobId"], job.to_string());
         assert_eq!(payload["machineId"], machine.to_string());
         assert_eq!(payload["type"], "job.succeeded");
-        assert_eq!(payload.as_object().unwrap().len(), 5);
+        assert_eq!(payload["schemaVersion"], 2);
+        assert_eq!(payload.as_object().unwrap().len(), 6);
     }
 }

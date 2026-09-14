@@ -145,7 +145,8 @@ The daemon's receipt storage is in memory: at most 128 requests and 256 MiB, inc
 records. Operation response recovery does not monitor command completion.
 
 Run `execution-gateway migrate` before starting the updated gateway; migration 0002 adds
-the per-job recovery capability and disconnected recovery deadline.
+the per-job recovery capability and disconnected recovery deadline, while migration
+0003 adds versioned webhook payload selection.
 
 Disabling a user/machine blocks new dispatches while preserving connections and
 already-dispatched work. Revoking a user API key does not cancel accepted jobs.

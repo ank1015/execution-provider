@@ -448,6 +448,10 @@ async fn api_registration_jobs_and_isolation() {
     let stored: (String, Vec<u8>) = sqlx::query_as("SELECT k.key_hash,u.webhook_secret_encrypted FROM user_api_keys k JOIN users u ON u.id=k.user_id WHERE u.id=$1").bind(user).fetch_one(&db.pool).await.unwrap();
     assert_ne!(stored.0, key);
     assert_eq!(crypto::decrypt(&[42; 32], user, &stored.1).unwrap(), secret);
+    assert_eq!(
+        gateway.request(Method::GET, "/v1/me", &key, None).await.1["webhookPayloadVersion"],
+        2
+    );
     let patch = gateway
         .request(
             Method::PATCH,
@@ -458,6 +462,43 @@ async fn api_registration_jobs_and_isolation() {
         .await;
     assert_eq!(patch.0, 200);
     assert_eq!(patch.1["name"], "Updated");
+    assert_eq!(patch.1["webhookPayloadVersion"], 2);
+    assert_eq!(
+        gateway
+            .request(
+                Method::PATCH,
+                "/v1/me",
+                &key,
+                Some(json!({"webhookPayloadVersion":1}))
+            )
+            .await
+            .1["webhookPayloadVersion"],
+        1
+    );
+    assert_eq!(
+        gateway
+            .request(
+                Method::PATCH,
+                "/v1/me",
+                &key,
+                Some(json!({"webhookPayloadVersion":2}))
+            )
+            .await
+            .1["webhookPayloadVersion"],
+        2
+    );
+    assert_eq!(
+        gateway
+            .request(
+                Method::PATCH,
+                "/v1/me",
+                &key,
+                Some(json!({"webhookPayloadVersion":3}))
+            )
+            .await
+            .0,
+        400
+    );
     assert_eq!(
         gateway
             .request(
@@ -705,7 +746,27 @@ async fn api_registration_jobs_and_isolation() {
         )
         .await;
     assert_eq!(detail.0, 200);
-    assert_eq!(detail.1["payload"]["type"], "job.succeeded");
+    let payload = &detail.1["payload"];
+    assert_eq!(payload["type"], "job.succeeded");
+    assert_eq!(payload["jobId"], running.to_string());
+    assert_eq!(payload["machineId"], machine.to_string());
+    assert_eq!(
+        payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            "completedAt",
+            "eventId",
+            "jobId",
+            "machineId",
+            "schemaVersion",
+            "type"
+        ])
+    );
+    assert_eq!(payload["schemaVersion"], 2);
     assert_eq!(
         gateway
             .request(
@@ -1330,6 +1391,28 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
     let request = callback.received().await;
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["eventId"], delivery.to_string());
+    assert_eq!(body["jobId"], job.to_string());
+    assert_eq!(body["machineId"], machine.to_string());
+    assert_eq!(body["type"], "job.failed");
+    assert_eq!(body["error"]["code"], "fixture");
+    assert!(body["response"].is_null());
+    assert!(body.get("schemaVersion").is_none());
+    assert_eq!(
+        body.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            "completedAt",
+            "error",
+            "eventId",
+            "jobId",
+            "machineId",
+            "response",
+            "type"
+        ])
+    );
     let header = |name: &str| {
         request
             .headers

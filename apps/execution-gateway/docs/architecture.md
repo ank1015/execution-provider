@@ -261,7 +261,7 @@ wire-compatible protocol data.
 
 | Table | Durable responsibility | Critical constraints |
 | --- | --- | --- |
-| `users` | Customer identity, enabled state, callback URL, encrypted webhook secret | Admin-created; historical ownership retained |
+| `users` | Customer identity, enabled state, callback URL, encrypted webhook secret, payload version | Admin-created; historical ownership retained |
 | `user_api_keys` | Hashed user credentials and revocation metadata | Unique hash; many keys per user |
 | `machines` | Ownership, enrollment identity, credential version, last runtime metadata | One current credential; soft deletion |
 | `machine_registration_tokens` | Short-lived enrollment tokens | Hashed, single-use, expiring |
@@ -284,10 +284,12 @@ response to measured query plans rather than anticipated JSON access patterns.
 The terminal job transaction captures the user's callback URL and writes one immutable
 event. Callback I/O happens later, outside database transactions.
 
-The event contains only `eventId`, `type`, `jobId`, `machineId`, and `completedAt`.
-Consumers durably accept this wake-up event and retrieve the response or gateway error
-from the job endpoint. This avoids duplicating potentially large execution responses in
-the outbox and receiver inbox.
+Version 2 events contain only `schemaVersion`, `eventId`, `type`, `jobId`, `machineId`,
+and `completedAt`. Consumers durably accept this wake-up event and retrieve the response
+or gateway error from the job endpoint. This avoids duplicating potentially large
+execution responses in the outbox and receiver inbox. Migrated users remain on the
+legacy version 1 schema until they opt in; new users default to version 2. Historical
+delivery payloads remain immutable.
 
 The worker claims one eligible delivery with `FOR UPDATE SKIP LOCKED`, creates an attempt,
 and assigns a 60-second lease. It then decrypts the current user secret, signs the exact

@@ -182,13 +182,15 @@ Create a user:
 ```json
 {
   "name": "Example application",
-  "callbackUrl": ""
+  "callbackUrl": "",
+  "webhookPayloadVersion": 2
 }
 ```
 
 `callbackUrl` is required. Use an empty string to disable webhooks. A nonempty value
-must be HTTPS and cannot contain credentials or a fragment. The response contains all
-three one-time secrets or resources created by the request:
+must be HTTPS and cannot contain credentials or a fragment. `webhookPayloadVersion`
+may be 1 or 2 and defaults to 2. The response contains all three one-time secrets or
+resources created by the request:
 
 ```json
 {
@@ -197,6 +199,7 @@ three one-time secrets or resources created by the request:
     "name": "Example application",
     "enabled": true,
     "callbackUrl": "",
+    "webhookPayloadVersion": 2,
     "createdAt": "2026-01-01T00:00:00Z",
     "updatedAt": "2026-01-01T00:00:00Z"
   },
@@ -213,7 +216,8 @@ three one-time secrets or resources created by the request:
 }
 ```
 
-A user patch accepts at least one of `name`, `callbackUrl`, or `enabled`:
+A user patch accepts at least one of `name`, `callbackUrl`, `enabled`, or
+`webhookPayloadVersion`:
 
 ```json
 {"enabled": false}
@@ -241,7 +245,7 @@ These endpoints require a user API key.
 | Method | Endpoint | Response | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/v1/me` | `200` | Read the authenticated user |
-| `PATCH` | `/v1/me` | `200` | Change `name` or `callbackUrl` |
+| `PATCH` | `/v1/me` | `200` | Change `name`, `callbackUrl`, or webhook payload version |
 | `POST` | `/v1/me/webhook-secret/rotate` | `200` | Replace and return the webhook secret |
 
 The user profile cannot change its own `enabled` state. Secret rotation returns:
@@ -602,10 +606,11 @@ List filters are `jobId` and `status`. Delivery statuses are `pending`, `deliver
 1–100 and a numeric `attemptCursor`.
 
 The gateway creates one event when a job reaches a terminal state and the user has a
-nonempty callback URL:
+nonempty callback URL. Payload version 2 is lightweight and has this shape:
 
 ```json
 {
+  "schemaVersion": 2,
   "eventId": "00000000-0000-0000-0000-000000000007",
   "type": "job.succeeded",
   "jobId": "00000000-0000-0000-0000-000000000004",
@@ -614,9 +619,16 @@ nonempty callback URL:
 }
 ```
 
-Event types are `job.succeeded`, `job.failed`, and `job.unknown`. The gateway does not
+Event types are `job.succeeded`, `job.failed`, and `job.unknown`. Version 2 does not
 embed the request, response, gateway error, credentials, or account data. After durably
 recording the event, retrieve the authoritative result from either job-detail endpoint.
+
+Payload version 1 is retained for compatibility and omits `schemaVersion`; it adds
+`response` and `error` fields containing the terminal job outcome. Users migrated from
+an earlier release remain on version 1. Newly created users default to version 2. Set
+`webhookPayloadVersion` to 1 or 2 through either user patch endpoint to control future
+events. Existing delivery payloads remain immutable, including during redelivery.
+
 The gateway does not emit a later event when a process started by a completed job exits.
 
 Saving a callback URL does not by itself permit outbound traffic. Its exact HTTPS
