@@ -277,4 +277,13 @@ pub struct RuntimeInfo {
     pub pty: bool,
     pub pipe_interrupt: bool,
     pub terminal_interrupt: bool,
+    pub filesystem: FileSystemCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSystemCapabilities {
+    pub max_read_bytes: usize,
+    pub max_write_bytes: usize,
+    pub conditional_mutations: bool,
+    pub atomic_replace: bool,
 }

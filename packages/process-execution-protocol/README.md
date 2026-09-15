@@ -1,10 +1,10 @@
 # process-execution-protocol
 
-Shared version 1 execution RPC types, dispatch, JSON byte/cursor encoding, and
+Shared version 2 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
 batching. Both `process-execution` and `process-execution-host-daemon` use this crate.
 It embeds no network transport and owns no processes independently of the supplied core.
 
-The [execution API reference](../../apps/process-execution/README.md#protocol-version-1)
+The [execution API reference](../../apps/process-execution/README.md#protocol-version-2)
 documents the existing single-operation requests and responses. Their JSON format is
 unchanged. `runtime_config::RuntimeConfig` provides the common JSON configuration
 for an embedded core.
@@ -27,7 +27,7 @@ Send `operations` instead of `operation`/`params`:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "batch-1",
   "mode": "parallel",
   "operations": [
@@ -71,7 +71,7 @@ when one command must finish before the next begins. References to earlier batch
 are not supported; newly returned handles require a subsequent request.
 
 No rollback occurs. Each operation retains its existing retry semantics: `start_id`,
-`input_id`, and interrupt `operation_id` still matter. `request_id` is correlation in the local RPC transport. Negotiated gateway
+`input_id`, interrupt `operation_id`, and filesystem `mutation_id` still matter. `request_id` is correlation in the local RPC transport. Negotiated gateway
 recovery also uses the outer ID for in-memory deduplication until acknowledgement. An accepted batch continues if its client disconnects while its
 host remains running. Lost responses can be recovered through observation/listing and
 appropriate per-operation retries. Daemon shutdown can interrupt unfinished batch work.
@@ -82,7 +82,7 @@ must still be considered before pausing it.
 
 ## Gateway transport contract
 
-`gateway::{HostMessage, GatewayMessage}` defines the version 1 handshake:
+`gateway::{HostMessage, GatewayMessage}` defines the version 2 handshake:
 
 1. The daemon connects to `wss://GATEWAY/BASE/v1/machines/MACHINE_ID/connect`, authenticating
    with an `Authorization: Bearer ...` header. It sends a `hello` containing protocol

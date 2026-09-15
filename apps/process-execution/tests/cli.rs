@@ -116,7 +116,7 @@ impl Server {
     }
 
     fn request(&self, operation: &str, params: Value) -> Value {
-        let mut request = json!({"protocol_version": 1, "request_id": Uuid::new_v4().to_string(),
+        let mut request = json!({"protocol_version": process_execution_protocol::VERSION, "request_id": Uuid::new_v4().to_string(),
             "expected_generation_id": self.generation, "operation": operation});
         if !params.is_null() {
             request["params"] = params;
@@ -274,7 +274,10 @@ async fn version_health_and_graceful_shutdown() {
     assert!(version.status.success());
     let version: Value = serde_json::from_slice(&version.stdout).unwrap();
     assert_eq!(version["binary"], "process-execution");
-    assert_eq!(version["protocol_version"], 1);
+    assert_eq!(
+        version["protocol_version"],
+        process_execution_protocol::VERSION
+    );
     let mut server = Server::start().await;
     let info = server
         .ok(&server.request("runtime.info", Value::Null))
@@ -297,7 +300,7 @@ async fn version_health_and_graceful_shutdown() {
 #[tokio::test]
 async fn rpc_supports_batches_and_sets_exit_code_for_partial_failure() {
     let server = Server::start().await;
-    let batch = json!({"protocol_version": 1, "request_id": "batch", "mode": "parallel", "operations": [
+    let batch = json!({"protocol_version": process_execution_protocol::VERSION, "request_id": "batch", "mode": "parallel", "operations": [
         {"request_id": "one", "operation": "runtime.info"},
         {"request_id": "two", "operation": "execution.list", "params": {}}
     ]});
@@ -702,8 +705,7 @@ async fn stale_unix_socket_is_recovered_and_regular_files_are_preserved() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let request =
-        json!({"protocol_version": 1, "request_id": "stop", "operation": "runtime.shutdown"});
+    let request = json!({"protocol_version": process_execution_protocol::VERSION, "request_id": "stop", "operation": "runtime.shutdown"});
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let output = rpc(&endpoint.clone().into_os_string(), &request).await;

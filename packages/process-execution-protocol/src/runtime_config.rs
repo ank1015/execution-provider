@@ -30,6 +30,9 @@ struct LimitOverrides {
     termination_grace_ms: Option<u64>,
     max_termination_grace_ms: Option<u64>,
     output_drain_timeout_ms: Option<u64>,
+    max_file_read_bytes: Option<usize>,
+    max_file_write_bytes: Option<usize>,
+    max_file_mutation_receipts: Option<usize>,
 }
 
 pub fn load(path: Option<&Path>, cwd: Option<PathBuf>) -> crate::Result<Config> {
@@ -88,6 +91,15 @@ impl LimitOverrides {
         }
         if let Some(v) = self.output_drain_timeout_ms {
             limits.output_drain_timeout = Duration::from_millis(v);
+        }
+        if let Some(v) = self.max_file_read_bytes {
+            limits.max_file_read_bytes = v;
+        }
+        if let Some(v) = self.max_file_write_bytes {
+            limits.max_file_write_bytes = v;
+        }
+        if let Some(v) = self.max_file_mutation_receipts {
+            limits.max_file_mutation_receipts = v;
         }
     }
 }

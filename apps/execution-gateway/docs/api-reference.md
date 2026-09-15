@@ -445,7 +445,7 @@ A successful daemon response has this envelope:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "00000000-0000-0000-0000-000000000004",
   "generation_id": "00000000-0000-0000-0000-000000000005",
   "status": "ok",
@@ -479,6 +479,10 @@ The remote API accepts every process-execution operation except `runtime.shutdow
 | `execution.terminate` | `handle`, optional `grace_period_ms` | Execution snapshot |
 | `execution.resize_terminal` | `handle`, `rows`, `cols` | Execution snapshot |
 | `execution.list` | Optional state, labels, limit, and page cursor | Execution page |
+| `filesystem.get_metadata` | `path`, optional `cwd` | File metadata |
+| `filesystem.read_file` | `path`, optional `cwd`/`max_bytes` | Metadata, padded-base64 bytes, and SHA-256 |
+| `filesystem.write_file` | Stable `mutation_id`, path, padded-base64 bytes, precondition | Conditional atomic replacement receipt |
+| `filesystem.remove_file` | Stable `mutation_id`, path, precondition | Conditional file removal receipt |
 
 An execution handle contains both identities required to address a process:
 
@@ -521,9 +525,16 @@ Use caller-stable retry identities for side-effecting operations:
 - `start_id` for `execution.start`.
 - `input_id` for `execution.write_input`.
 - `operation_id` for `execution.interrupt`.
+- `mutation_id` for `filesystem.write_file` and `filesystem.remove_file`.
 
 Reuse one of these IDs only with the same action and payload. A request ID correlates a
 batch item; it does not replace operation-level deduplication.
+
+Filesystem reads are whole-file and bounded by the host's advertised limit. Their SHA-256
+can be supplied as `{"type":"sha256","sha256":"..."}` to a later mutation; file creation
+uses `{"type":"missing"}`. A mutation returns `already_applied` when its desired final state
+already exists, allowing safe recovery after a lost response. Removal accepts files only
+and is never recursive.
 
 The optional top-level `expected_generation_id` rejects a submission if the live
 runtime generation has changed:
