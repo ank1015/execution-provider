@@ -14,7 +14,7 @@ pub mod runtime_config;
 pub use batch::*;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +66,46 @@ pub enum Operation {
     },
     #[serde(rename = "execution.list")]
     List(ListParams),
+    #[serde(rename = "filesystem.get_metadata")]
+    GetFileMetadata(FilePathParams),
+    #[serde(rename = "filesystem.read_file")]
+    ReadFile(ReadFileParams),
+    #[serde(rename = "filesystem.write_file")]
+    WriteFile(WriteFileParams),
+    #[serde(rename = "filesystem.remove_file")]
+    RemoveFile(RemoveFileParams),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FilePathParams {
+    pub cwd: Option<PathBuf>,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadFileParams {
+    pub cwd: Option<PathBuf>,
+    pub path: PathBuf,
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WriteFileParams {
+    pub mutation_id: String,
+    pub cwd: Option<PathBuf>,
+    pub path: PathBuf,
+    pub data_base64: String,
+    #[serde(default)]
+    pub create_parent_directories: bool,
+    pub precondition: core::FilePrecondition,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemoveFileParams {
+    pub mutation_id: String,
+    pub cwd: Option<PathBuf>,
+    pub path: PathBuf,
+    pub precondition: core::FilePrecondition,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -275,6 +315,56 @@ async fn dispatch_operation(
                 json!({"executions": result.executions, "next_page_cursor": result.next_page_cursor.as_ref().map(encode_cursor).transpose()?}),
             )
         }
+        Operation::GetFileMetadata(params) => value(
+            runtime
+                .get_file_metadata(core::FilePathRequest {
+                    cwd: params.cwd,
+                    path: params.path,
+                })
+                .await?,
+        ),
+        Operation::ReadFile(params) => {
+            let result = runtime
+                .read_file(core::ReadFileRequest {
+                    cwd: params.cwd,
+                    path: params.path,
+                    max_bytes: params.max_bytes,
+                })
+                .await?;
+            Ok(json!({
+                "path": result.path,
+                "metadata": result.metadata,
+                "data_base64": STANDARD.encode(result.data),
+                "sha256": result.sha256,
+            }))
+        }
+        Operation::WriteFile(params) => {
+            let data = STANDARD
+                .decode(params.data_base64)
+                .map_err(|error| invalid(format!("invalid base64 file data: {error}")))?;
+            value(
+                runtime
+                    .write_file(core::WriteFileRequest {
+                        mutation_id: params.mutation_id,
+                        cwd: params.cwd,
+                        path: params.path,
+                        data,
+                        create_parent_directories: params.create_parent_directories,
+                        precondition: params.precondition,
+                    })
+                    .await?,
+            )
+        }
+        Operation::RemoveFile(params) => value(
+            runtime
+                .remove_file(core::RemoveFileRequest {
+                    mutation_id: params.mutation_id,
+                    cwd: params.cwd,
+                    path: params.path,
+                    precondition: params.precondition,
+                })
+                .await?,
+        ),
     }
 }
 

@@ -337,8 +337,8 @@ impl MachineSocket {
             format!("Bearer {credential}").parse().unwrap(),
         );
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        socket.send(Message::Text(json!({"type":"hello","protocol_version":1,"installation_id":installation,"host_id":machine,"request_recovery":recovery,
-            "runtime":{"generation_id":generation,"default_shell":{"executable":"sh","kind":"sh"},"pty":true,"pipe_interrupt":true,"terminal_interrupt":true},
+        socket.send(Message::Text(json!({"type":"hello","protocol_version":process_execution_protocol::VERSION,"installation_id":installation,"host_id":machine,"request_recovery":recovery,
+            "runtime":{"generation_id":generation,"default_shell":{"executable":"sh","kind":"sh"},"pty":true,"pipe_interrupt":true,"terminal_interrupt":true,"filesystem":{"max_read_bytes":5242880,"max_write_bytes":5242880,"conditional_mutations":true,"atomic_replace":true}},
             "binary":{"binary":"fixture","version":"0.1.0","platform":"test","architecture":"test"}}).to_string().into())).await.unwrap();
         let welcome = timeout(Duration::from_secs(5), socket.next())
             .await
@@ -380,7 +380,7 @@ impl MachineSocket {
             .unwrap();
     }
     async fn reply(&mut self, request: &Value, result: Value) {
-        self.socket.send(Message::Text(json!({"type":"response","response":{"protocol_version":1,"request_id":request["request_id"],"generation_id":self.generation,"status":"ok","result":result}}).to_string().into())).await.unwrap();
+        self.socket.send(Message::Text(json!({"type":"response","response":{"protocol_version":process_execution_protocol::VERSION,"request_id":request["request_id"],"generation_id":self.generation,"status":"ok","result":result}}).to_string().into())).await.unwrap();
     }
     async fn idle(&mut self) {
         let result = timeout(Duration::from_millis(350), async {
@@ -1102,7 +1102,67 @@ async fn daemon_registers_and_recovers_jobs_after_gateway_restart() {
     let info = gateway
         .job(&key, machine, "info", json!({"operation":"runtime.info"}))
         .await;
-    assert_eq!(gateway.terminal(&key, info).await["status"], "succeeded");
+    let info = gateway.terminal(&key, info).await;
+    assert_eq!(info["status"], "succeeded");
+    assert_eq!(
+        info["response"]["result"]["runtime"]["filesystem"]["conditional_mutations"],
+        true
+    );
+    let file = profile.path().join("gateway-files").join("binary.dat");
+    let write = gateway
+        .job(
+            &key,
+            machine,
+            "file-write",
+            json!({
+                "operation":"filesystem.write_file",
+                "params":{
+                    "mutation_id":"gateway-file-write",
+                    "path":file,
+                    "data_base64":"AP8B",
+                    "create_parent_directories":true,
+                    "precondition":{"type":"missing"}
+                }
+            }),
+        )
+        .await;
+    let write = gateway.terminal(&key, write).await;
+    assert_eq!(write["status"], "succeeded", "{write}");
+    let expected_sha256 = write["response"]["result"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(write["response"]["result"]["disposition"], "applied");
+    let read = gateway
+        .job(
+            &key,
+            machine,
+            "file-read",
+            json!({"operation":"filesystem.read_file","params":{"path":file}}),
+        )
+        .await;
+    let read = gateway.terminal(&key, read).await;
+    assert_eq!(read["status"], "succeeded", "{read}");
+    assert_eq!(read["response"]["result"]["data_base64"], "AP8B");
+    assert_eq!(read["response"]["result"]["sha256"], expected_sha256);
+    let remove = gateway
+        .job(
+            &key,
+            machine,
+            "file-remove",
+            json!({
+                "operation":"filesystem.remove_file",
+                "params":{
+                    "mutation_id":"gateway-file-remove",
+                    "path":file,
+                    "precondition":{"type":"sha256","sha256":expected_sha256}
+                }
+            }),
+        )
+        .await;
+    let remove = gateway.terminal(&key, remove).await;
+    assert_eq!(remove["status"], "succeeded", "{remove}");
+    assert_eq!(remove["response"]["result"]["disposition"], "applied");
     let batch = gateway.job(&key, machine, "real-batch", json!({"mode":"parallel","operations":[
         {"request_id":"version","operation":"execution.start","params":{"start_id":"version-command","command":{"type":"program","executable":env!("CARGO_BIN_EXE_execution-gateway"),"args":["version"]},"wait_ms":1000}},
         {"request_id":"info","operation":"runtime.info"}
@@ -1124,7 +1184,7 @@ async fn daemon_registers_and_recovers_jobs_after_gateway_restart() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 5);
     // An actual batch completes while its daemon reconnects to the restarted gateway.
     let source = profile.path().join("child.rs");
     let program = profile

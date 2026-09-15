@@ -24,13 +24,14 @@ read_secret() {
 database_url="$(read_secret execution-gateway-2-database-url)"
 admin_api_key="$(read_secret execution-gateway-2-admin-api-key)"
 encryption_key="$(read_secret execution-gateway-2-encryption-key)"
+webhook_allowed_origins="${WEBHOOK_ALLOWED_ORIGINS:-https://streak-upscale-okay.ngrok-free.dev}"
 
 {
   printf 'DATABASE_URL=%s\n' "$database_url"
   printf 'ADMIN_API_KEY=%s\n' "$admin_api_key"
   printf 'ENCRYPTION_KEY=%s\n' "$encryption_key"
   printf 'LISTEN_ADDR=0.0.0.0:3000\n'
-  printf 'WEBHOOK_ALLOWED_ORIGINS=\n'
+  printf 'WEBHOOK_ALLOWED_ORIGINS=%s\n' "$webhook_allowed_origins"
   printf 'REQUEST_RETENTION_DAYS=7\n'
 } > runtime.env.new
 chmod 0600 runtime.env.new

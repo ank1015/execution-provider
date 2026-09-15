@@ -158,6 +158,20 @@ of finished retention, a 2-second termination grace period, and a 1-second outpu
 `Limits` also bounds observation waits and retry receipt counts. Capacity exhaustion
 rejects new starts without evicting active work.
 
+## Filesystem operations
+
+The core also provides bounded whole-file metadata/read operations and conditional
+write/remove mutations for trusted callers. Relative paths resolve against the requested
+cwd and then the configured runtime cwd. Reads return binary data and SHA-256; protocol
+adapters choose the wire encoding. The default read and write limit is 5 MiB.
+
+Writes use a temporary file in the destination directory followed by atomic replacement.
+They can create missing parent directories. Mutations require either a missing-file or
+SHA-256 precondition, affect regular files only, and use a stable mutation ID. Identical
+retries return the retained receipt. A different request using the same ID conflicts.
+The core retains 4,096 mutation receipts by default, and also recognizes an already
+achieved final state after receipt loss or a runtime restart.
+
 ## Platform behavior
 
 Linux and macOS use process groups, native signals, and nonblocking Unix PTYs.

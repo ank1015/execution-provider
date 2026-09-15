@@ -47,7 +47,7 @@ In another terminal:
 
 ```sh
 process-execution health --endpoint "$HOME/.process-execution/runtime.sock"
-printf '%s\n' '{"protocol_version":1,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
+printf '%s\n' '{"protocol_version":2,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
   process-execution rpc --endpoint "$HOME/.process-execution/runtime.sock"
 ```
 
@@ -61,7 +61,7 @@ In another PowerShell terminal:
 
 ```powershell
 process-execution.exe health --endpoint '\\.\pipe\process-execution'
-'{"protocol_version":1,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
+'{"protocol_version":2,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
   process-execution.exe rpc --endpoint '\\.\pipe\process-execution'
 ```
 
@@ -105,7 +105,7 @@ and exits with code 1. Local parsing, transport, or timeout errors print a diagn
 to stderr and exit with code 1; CLI usage errors exit with code 2. A managed command's
 nonzero exit code is an execution result, not an RPC failure.
 
-## Protocol version 1
+## Protocol version 2
 
 The shared [process-execution-protocol](../../packages/process-execution-protocol/README.md)
 package owns request/response types and dispatch. Single-operation requests remain
@@ -118,7 +118,7 @@ Every request has this envelope:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "unique-correlation-id",
   "expected_generation_id": "UUID-from-health",
   "operation": "execution.get",
@@ -137,7 +137,7 @@ Successful responses have `status: "ok"` and `result`:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "unique-correlation-id",
   "generation_id": "supervisor-UUID",
   "status": "ok",
@@ -162,6 +162,10 @@ can have a null response `request_id` when it cannot be recovered.
 | `execution.terminate` | `{handle, grace_period_ms?}` | Execution snapshot acknowledging termination |
 | `execution.resize_terminal` | `{handle, rows, cols}` | Execution snapshot with terminal dimensions |
 | `execution.list` | `{state?, labels?, limit?, page_cursor?}` | `{executions, next_page_cursor}` |
+| `filesystem.get_metadata` | `{path, cwd?}` | File type, size, symlink, and modification metadata |
+| `filesystem.read_file` | `{path, cwd?, max_bytes?}` | Metadata, padded-base64 bytes, and SHA-256 |
+| `filesystem.write_file` | `{mutation_id, path, cwd?, data_base64, create_parent_directories?, precondition}` | Conditional atomic-replacement receipt |
+| `filesystem.remove_file` | `{mutation_id, path, cwd?, precondition}` | Conditional file-removal receipt |
 
 The `?` suffix in the table denotes an optional field, not part of its name.
 Start parameters:
@@ -209,6 +213,15 @@ results are null. Environment values are not included in snapshots.
 Listing defaults to `state: "active"`, no label filter, and `limit: 50`. Other states
 are `finished` and `all`. Preserve the filters when following `next_page_cursor`.
 
+Filesystem paths are absolute or resolve relative to `cwd`, which itself resolves against
+the configured runtime cwd. Reads are whole-file and fail rather than truncate when the
+requested/configured byte limit is exceeded. File bytes use standard padded base64. A
+write or remove precondition is either `{"type":"missing"}` or
+`{"type":"sha256","sha256":"64-lowercase-hex-characters"}`. Mutations affect regular
+files only; removal is never recursive. Reuse a `mutation_id` only with identical input.
+If the requested final state already exists after an uncertain response, the mutation
+returns `disposition: "already_applied"`.
+
 ## Lifetime, retries, and shutdown
 
 A disconnect, killed `rpc` process, observation timeout, or failed response delivery
@@ -226,7 +239,7 @@ flags returned by `health` and terminate when appropriate.
 process cleanup, and releases the endpoint. For example, submit this through `rpc`:
 
 ```json
-{"protocol_version":1,"request_id":"shutdown-1","operation":"runtime.shutdown"}
+{"protocol_version":2,"request_id":"shutdown-1","operation":"runtime.shutdown"}
 ```
 
 Abruptly killing the supervisor cannot run graceful shutdown. Output, retry records,
@@ -254,7 +267,10 @@ responsibility of the outer host/provider.
     "finished_retention_ms": 900000,
     "termination_grace_ms": 2000,
     "max_termination_grace_ms": 30000,
-    "output_drain_timeout_ms": 1000
+    "output_drain_timeout_ms": 1000,
+    "max_file_read_bytes": 5242880,
+    "max_file_write_bytes": 5242880,
+    "max_file_mutation_receipts": 4096
   }
 }
 ```

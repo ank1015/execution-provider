@@ -238,9 +238,9 @@ discarded after the durable result has already been chosen.
 Queued jobs are different because they have never been dispatched. They may run after a
 brief connection interruption, but fail if still queued after 30 seconds.
 
-## Execution and batch ownership
+## Execution, filesystem, and batch ownership
 
-The daemon embeds `process-execution-core` and owns every execution. The gateway stores
+The daemon embeds `process-execution-core` and owns every execution and filesystem action. The gateway stores
 only the requested operation or batch and its returned protocol response. There are no
 gateway tables for executions, output chunks, or batch child jobs.
 
@@ -252,6 +252,11 @@ batch response, just like a process started by a single operation.
 Callers use `execution.get`, `execution.observe`, `execution.list`, and control
 operations in later jobs. The execution handle includes the runtime generation, which
 prevents a handle from silently addressing a replacement runtime.
+
+Filesystem reads are bounded and content-addressed. Writes and removals carry stable
+mutation identities plus missing-file or SHA-256 preconditions. Each file mutation is
+individually atomic and replay-safe; a sequential batch can still commit a prefix before
+a later item fails, and the returned item outcomes describe that prefix.
 
 ## Persistence model
 

@@ -219,7 +219,7 @@ async fn send(socket: &mut Socket, value: Value) {
         .unwrap();
 }
 async fn welcome(socket: &mut Socket, interval: u64) {
-    send(socket, json!({"type": "welcome", "protocol_version": 1, "connection_id": Uuid::new_v4(), "heartbeat_interval_ms": interval})).await;
+    send(socket, json!({"type": "welcome", "protocol_version": process_execution_protocol::VERSION, "connection_id": Uuid::new_v4(), "heartbeat_interval_ms": interval})).await;
 }
 async fn receive(socket: &mut Socket) -> Value {
     timeout(Duration::from_secs(10), async {
@@ -237,7 +237,7 @@ async fn receive(socket: &mut Socket) -> Value {
 }
 
 async fn rpc(socket: &mut Socket, mut request: Value) -> Value {
-    request["protocol_version"] = json!(1);
+    request["protocol_version"] = json!(process_execution_protocol::VERSION);
     request["request_id"] = json!(Uuid::new_v4());
     send(socket, json!({"type": "request", "request": request})).await;
     let response = receive(socket).await;
@@ -256,6 +256,10 @@ async fn authenticated_execution_batches_and_local_administration_boundary() {
     let mut host = Host::start(&listener).await;
     let (mut socket, hello) = accept(&listener, host.id).await;
     welcome(&mut socket, 1000).await;
+    assert_eq!(
+        hello["runtime"]["filesystem"]["conditional_mutations"],
+        true
+    );
     let batch = rpc(&mut socket, json!({"expected_generation_id": hello["runtime"]["generation_id"], "mode": "parallel", "operations": [
         {"request_id": "info", "operation": "runtime.info"},
         {"request_id": "list", "operation": "execution.list", "params": {}}
@@ -282,6 +286,38 @@ async fn authenticated_execution_batches_and_local_administration_boundary() {
         })
         .collect();
     assert!(String::from_utf8_lossy(&output).contains("env=configured"));
+    let written = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.write_file","params":{
+            "mutation_id":"daemon-file-create","path":"nested/file.bin",
+            "data_base64":STANDARD.encode([0, 255, 1]),"create_parent_directories":true,
+            "precondition":{"type":"missing"}
+        }}),
+    )
+    .await;
+    assert_eq!(written["result"]["disposition"], "applied");
+    let read = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.read_file","params":{"path":"nested/file.bin","max_bytes":3}}),
+    )
+    .await;
+    assert_eq!(read["result"]["data_base64"], STANDARD.encode([0, 255, 1]));
+    let metadata = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.get_metadata","params":{"path":"nested/file.bin"}}),
+    )
+    .await;
+    assert_eq!(metadata["result"]["size"], 3);
+    let removed = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.remove_file","params":{
+            "mutation_id":"daemon-file-remove","path":"nested/file.bin",
+            "precondition":{"type":"sha256","sha256":read["result"]["sha256"]}
+        }}),
+    )
+    .await;
+    assert_eq!(removed["result"]["disposition"], "applied");
+    assert!(!host.directory.path().join("nested/file.bin").exists());
     let mismatched = rpc(&mut socket, json!({"operation": "execution.list", "params": {}, "expected_generation_id": Uuid::new_v4()})).await;
     assert_eq!(mismatched["error"]["code"], "generation_mismatch");
     host.revoke(&mut socket).await;
@@ -297,7 +333,7 @@ async fn missed_heartbeats_reconnect_without_losing_execution_or_accepted_batch(
     let handle = &started["result"]["execution"]["handle"];
     let mut later = start("later", &["exit", "0"]);
     later["request_id"] = json!("later");
-    send(&mut first, json!({"type": "request", "request": {"protocol_version": 1, "request_id": "accepted-batch", "mode": "sequential", "operations": [
+    send(&mut first, json!({"type": "request", "request": {"protocol_version": process_execution_protocol::VERSION, "request_id": "accepted-batch", "mode": "sequential", "operations": [
         {"request_id": "wait", "operation": "execution.observe", "params": {"handle": handle, "wait_ms": 10000, "return_when": "finished_or_timeout"}}, later
     ]}})).await;
     // Leave TCP open but stop reading/responding to heartbeats, as with a stale network.
@@ -504,12 +540,12 @@ async fn request_receipts_survive_reconnect_and_release_only_after_acknowledgeme
     let (mut first, hello) = accept(&listener, host.id).await;
     assert_eq!(hello["request_recovery"], true);
     let generation = hello["runtime"]["generation_id"].clone();
-    let welcome = json!({"type":"welcome","protocol_version":1,"connection_id":Uuid::new_v4(),"heartbeat_interval_ms":1000,"request_recovery":true});
+    let welcome = json!({"type":"welcome","protocol_version":process_execution_protocol::VERSION,"connection_id":Uuid::new_v4(),"heartbeat_interval_ms":1000,"request_recovery":true});
     send(&mut first, welcome.clone()).await;
     let mut operation = start("sleep-once", &["sleep"]);
     operation["request_id"] = json!("start");
     operation["params"]["wait_ms"] = json!(2000);
-    let request = json!({"protocol_version":1,"request_id":"retained-batch","expected_generation_id":generation,
+    let request = json!({"protocol_version":process_execution_protocol::VERSION,"request_id":"retained-batch","expected_generation_id":generation,
         "mode":"sequential","operations":[operation, {"request_id":"list","operation":"execution.list","params":{"state":"all"}}]});
     send(&mut first, json!({"type":"request","request":request})).await;
     assert_eq!(receive(&mut first).await["type"], "accepted");

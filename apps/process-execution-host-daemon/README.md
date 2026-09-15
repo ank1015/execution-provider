@@ -130,7 +130,7 @@ only for loopback addresses or `localhost`; there is no option to disable TLS ve
 The daemon sends a versioned hello with host identity, runtime generation, shell, and
 PTY/interrupt capabilities. The gateway then sends the welcome and execution requests
 defined in [process-execution-protocol](../../packages/process-execution-protocol/README.md).
-All execution operations and sequential/parallel batches are supported. `runtime.shutdown`
+All execution and bounded filesystem operations and sequential/parallel batches are supported. `runtime.shutdown`
 is restricted to local administration and is rejected over this connection.
 
 Connect, welcome, and write deadlines are 10 seconds. Heartbeats run independently of

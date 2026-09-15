@@ -14,13 +14,14 @@ use uuid::Uuid;
 
 /// Cloneable access to one runtime generation. Dropping a request never cancels an accepted start.
 #[derive(Clone)]
-pub struct ProcessExecutionCore(Arc<Inner>);
+pub struct ProcessExecutionCore(pub(crate) Arc<Inner>);
 
-struct Inner {
-    config: Config,
+pub(crate) struct Inner {
+    pub(crate) config: Config,
     info: RuntimeInfo,
     registry: Mutex<Registry>,
-    shutdown: CancellationToken,
+    pub(crate) shutdown: CancellationToken,
+    pub(crate) file_mutations: tokio::sync::Mutex<FileMutationRegistry>,
 }
 
 struct Registry {
@@ -68,6 +69,12 @@ impl ProcessExecutionCore {
             pty: true,
             pipe_interrupt: cfg!(unix),
             terminal_interrupt: true,
+            filesystem: FileSystemCapabilities {
+                max_read_bytes: config.limits.max_file_read_bytes,
+                max_write_bytes: config.limits.max_file_write_bytes,
+                conditional_mutations: true,
+                atomic_replace: true,
+            },
         };
         let core = Self(Arc::new(Inner {
             config,
@@ -80,6 +87,7 @@ impl ProcessExecutionCore {
                 shutting_down: false,
             }),
             shutdown: CancellationToken::new(),
+            file_mutations: tokio::sync::Mutex::new(FileMutationRegistry::default()),
         }));
         let weak = Arc::downgrade(&core.0);
         let period = (core.0.config.limits.finished_retention / 2)

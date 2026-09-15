@@ -10,6 +10,7 @@ pub enum ErrorCode {
     InvalidState,
     GenerationMismatch,
     IdempotencyConflict,
+    PreconditionFailed,
     StdinClosed,
     UnsupportedOperation,
     ResourceLimit,

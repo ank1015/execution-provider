@@ -11,6 +11,16 @@ fn request_validation_preserves_protocol_semantics() {
     .unwrap();
     assert_eq!(normalized["mode"], "sequential");
     assert_eq!(normalized["operations"][1]["params"]["limit"], 50);
+    let filesystem = jobs::normalize(json!({
+        "operation":"filesystem.write_file",
+        "params":{
+            "mutation_id":"write-1","path":"file.bin","data_base64":"AP8=",
+            "create_parent_directories":true,"precondition":{"type":"missing"}
+        }
+    }))
+    .unwrap();
+    assert_eq!(filesystem["operation"], "filesystem.write_file");
+    assert_eq!(filesystem["params"]["data_base64"], "AP8=");
     let id = Uuid::new_v4();
     let generation = Uuid::new_v4();
     let wire = jobs::wire_request(normalized, id, generation).unwrap();

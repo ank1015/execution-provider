@@ -43,7 +43,7 @@ fn start(id: &str) -> Value {
 
 async fn dispatch(dispatcher: &Dispatcher, payload: Value) -> Value {
     let mut payload = payload;
-    payload["protocol_version"] = json!(1);
+    payload["protocol_version"] = json!(process_execution_protocol::VERSION);
     payload["request_id"] = json!("envelope");
     let response = dispatcher
         .dispatch(serde_json::from_value(payload).unwrap())
@@ -135,7 +135,7 @@ async fn invalid_batches_and_generation_fences_have_no_side_effects() {
 async fn gateway_dispatcher_rejects_shutdown() {
     let (core, _) = runtime();
     let dispatcher = Dispatcher::gateway(core.clone(), version_info("test", "0"));
-    let response = dispatcher.dispatch(serde_json::from_value(json!({"protocol_version": 1,"request_id": "stop", "operation": "runtime.shutdown"})).unwrap()).await;
+    let response = dispatcher.dispatch(serde_json::from_value(json!({"protocol_version": process_execution_protocol::VERSION,"request_id": "stop", "operation": "runtime.shutdown"})).unwrap()).await;
     assert!(matches!(response.outcome, Outcome::Error { .. }));
     assert!(dispatch(&dispatcher, start("still-running")).await["result"]["execution"].is_object());
     core.shutdown().await.unwrap();
@@ -144,8 +144,8 @@ async fn gateway_dispatcher_rejects_shutdown() {
 #[test]
 fn mixed_and_nested_batches_are_rejected() {
     for value in [
-        json!({"protocol_version": 1,"request_id": "bad", "operation": "runtime.info", "operations": []}),
-        json!({"protocol_version": 1,"request_id": "bad", "operations": [{"request_id": "nested", "operations": []}]}),
+        json!({"protocol_version": process_execution_protocol::VERSION,"request_id": "bad", "operation": "runtime.info", "operations": []}),
+        json!({"protocol_version": process_execution_protocol::VERSION,"request_id": "bad", "operations": [{"request_id": "nested", "operations": []}]}),
     ] {
         assert!(serde_json::from_value::<Request>(value).is_err());
     }
@@ -154,8 +154,10 @@ fn mixed_and_nested_batches_are_rejected() {
 #[tokio::test]
 async fn oversized_request_id_cannot_overflow_the_error_response() {
     let (core, dispatcher) = runtime();
-    let request: Request = serde_json::from_value(json!({"protocol_version": 1,
-        "request_id": "x".repeat(1024), "operation": "runtime.info"}))
+    let request: Request = serde_json::from_value(
+        json!({"protocol_version": process_execution_protocol::VERSION,
+        "request_id": "x".repeat(1024), "operation": "runtime.info"}),
+    )
     .unwrap();
     let response = dispatcher.dispatch(request).await;
     assert!(!response.is_ok());
@@ -165,6 +167,67 @@ async fn oversized_request_id_cannot_overflow_the_error_response() {
             .unwrap()
             .len()
             < 1024
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn filesystem_operations_round_trip_binary_data_and_stop_stale_batches() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = ProcessExecutionCore::new(Config::new(directory.path())).unwrap();
+    let dispatcher = Dispatcher::local(core.clone(), version_info("test", "0"));
+    let written = dispatch(
+        &dispatcher,
+        json!({
+            "operation": "filesystem.write_file",
+            "params": {
+                "mutation_id": "create",
+                "path": "file.bin",
+                "data_base64": "AP8B",
+                "create_parent_directories": false,
+                "precondition": {"type": "missing"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(written["status"], "ok");
+    assert_eq!(written["result"]["bytes_written"], 3);
+
+    let read = dispatch(
+        &dispatcher,
+        json!({"operation":"filesystem.read_file","params":{"path":"file.bin","max_bytes":3}}),
+    )
+    .await;
+    assert_eq!(read["result"]["data_base64"], "AP8B");
+    let hash = read["result"]["sha256"].clone();
+
+    let batch = dispatch(
+        &dispatcher,
+        json!({"mode":"sequential","operations":[
+            {"request_id":"replace","operation":"filesystem.write_file","params":{
+                "mutation_id":"replace","path":"file.bin","data_base64":"bmV3",
+                "precondition":{"type":"sha256","sha256":hash}
+            }},
+            {"request_id":"stale","operation":"filesystem.write_file","params":{
+                "mutation_id":"stale","path":"file.bin","data_base64":"YmFk",
+                "precondition":{"type":"sha256","sha256":hash}
+            }},
+            {"request_id":"skipped","operation":"filesystem.remove_file","params":{
+                "mutation_id":"skipped","path":"file.bin","precondition":{"type":"missing"}
+            }}
+        ]}),
+    )
+    .await;
+    assert_eq!(batch["result"]["succeeded"], false);
+    assert_eq!(batch["result"]["results"][0]["status"], "ok");
+    assert_eq!(
+        batch["result"]["results"][1]["error"]["code"],
+        "precondition_failed"
+    );
+    assert_eq!(batch["result"]["results"][2]["status"], "skipped");
+    assert_eq!(
+        std::fs::read(directory.path().join("file.bin")).unwrap(),
+        b"new"
     );
     core.shutdown().await.unwrap();
 }

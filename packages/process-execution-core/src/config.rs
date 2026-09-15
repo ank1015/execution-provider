@@ -1,6 +1,10 @@
 use crate::{Error, Result, Shell};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+/// Maximum file payload that can safely fit in the versioned protocol frame
+/// after base64 and JSON encoding.
+pub const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub cwd: PathBuf,
@@ -34,6 +38,9 @@ pub struct Limits {
     pub termination_grace: Duration,
     pub max_termination_grace: Duration,
     pub output_drain_timeout: Duration,
+    pub max_file_read_bytes: usize,
+    pub max_file_write_bytes: usize,
+    pub max_file_mutation_receipts: usize,
 }
 
 impl Default for Limits {
@@ -51,6 +58,9 @@ impl Default for Limits {
             termination_grace: Duration::from_secs(2),
             max_termination_grace: Duration::from_secs(30),
             output_drain_timeout: Duration::from_secs(1),
+            max_file_read_bytes: MAX_FILE_BYTES,
+            max_file_write_bytes: MAX_FILE_BYTES,
+            max_file_mutation_receipts: 4096,
         }
     }
 }
@@ -65,6 +75,9 @@ impl Limits {
             self.max_queued_input_bytes,
             self.max_input_receipts,
             self.max_interrupt_receipts,
+            self.max_file_read_bytes,
+            self.max_file_write_bytes,
+            self.max_file_mutation_receipts,
         ]
         .contains(&0)
         {
@@ -75,6 +88,16 @@ impl Limits {
         }
         if self.termination_grace > self.max_termination_grace {
             return Err(Error::invalid("default termination grace exceeds maximum"));
+        }
+        if self.max_file_write_bytes > self.max_file_read_bytes {
+            return Err(Error::invalid(
+                "file write limit cannot exceed the file read limit",
+            ));
+        }
+        if self.max_file_read_bytes > MAX_FILE_BYTES {
+            return Err(Error::invalid(
+                "file byte limits exceed the protocol-safe maximum",
+            ));
         }
         Ok(())
     }
