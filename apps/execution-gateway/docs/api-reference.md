@@ -414,7 +414,7 @@ idempotent job even if that machine has since gone offline.
 | `queued` | No | Saved and waiting to be sent |
 | `dispatching` | No | Sent or being sent; daemon acceptance is not confirmed |
 | `waiting_response` | No | Daemon accepted the request and owns its completion |
-| `succeeded` | Yes | The operation or every batch item succeeded |
+| `succeeded` | Yes | The operation or every batch item succeeded or returned an explicitly accepted error code |
 | `failed` | Yes | A definite gateway, operation, or batch failure occurred |
 | `unknown` | Yes | Work may have run, but its response cannot be recovered |
 
@@ -562,6 +562,7 @@ Batches use the same `/v1/jobs` endpoint:
   "idempotencyKey": "inspect-machine-1",
   "request": {
     "mode": "parallel",
+    "accepted_error_codes": ["not_found"],
     "operations": [
       {"request_id": "info", "operation": "runtime.info"},
       {
@@ -575,6 +576,8 @@ Batches use the same `/v1/jobs` endpoint:
 ```
 
 - `mode` is `sequential` by default or `parallel`.
+- `accepted_error_codes` is optional. Listed per-item errors remain visible but do not
+  fail the outer job or stop sequential dispatch. Unlisted errors still fail normally.
 - A batch contains 1–32 operations with unique 1–256 byte `request_id` values.
 - Sequential mode waits for each operation response. The first operation error marks
   the remaining items `skipped`.

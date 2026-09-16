@@ -23,10 +23,10 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  RELEASE_BUCKET: execution-provider-releases-361197090477
+  R2_BUCKET: execution-provider-releases
+  R2_ENDPOINT: https://62fc73035acad6807728e4385fc03df0.r2.cloudflarestorage.com
   DOWNLOAD_BASE_URL: https://downloads.acentric.dev
 
 jobs:
@@ -122,10 +122,14 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish to Cloud Storage
+    name: Publish to Cloudflare R2
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
     steps:
       - name: Download packaged binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -145,7 +149,7 @@ jobs:
               jq -n \
                 --arg name "$file" \
                 --arg sha256 "$sha256" \
-                --arg uri "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/$file" \
+                --arg uri "r2://$R2_BUCKET/releases/$GITHUB_SHA/$file" \
                 --arg url "$DOWNLOAD_BASE_URL/releases/$GITHUB_SHA/$file" \
                 --argjson sizeBytes "$size" \
                 '{name: $name, sha256: $sha256, sizeBytes: $sizeBytes, uri: $uri, url: $url}'
@@ -154,39 +158,48 @@ jobs:
           jq -n \
             --arg commit "$GITHUB_SHA" \
             --arg createdAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --arg bucket "gs://$RELEASE_BUCKET" \
+            --arg bucket "r2://$R2_BUCKET" \
             --arg downloadBaseUrl "$DOWNLOAD_BASE_URL" \
             --argjson artifacts "$artifacts_json" \
             '{commit: $commit, createdAt: $createdAt, bucket: $bucket, downloadBaseUrl: $downloadBaseUrl, artifacts: $artifacts}' \
             > manifest.json
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: projects/361197090477/locations/global/workloadIdentityPools/github-actions/providers/execution-provider
-          service_account: execution-release-publisher@project-2c02a9f6-1ff5-461d-ae0.iam.gserviceaccount.com
-
-      - name: Set up Google Cloud CLI
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-
       - name: Publish immutable release
         run: |
-          gcloud storage cp \
+          aws s3 cp dist/ "s3://$R2_BUCKET/releases/$GITHUB_SHA/" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --recursive \
+            --exclude "*" \
+            --include "*.tar.gz" \
+            --include "*.zip" \
+            --include "checksums.sha256" \
+            --include "manifest.json" \
             --cache-control="public,max-age=31536000,immutable" \
-            dist/*.tar.gz dist/*.zip dist/checksums.sha256 \
-            "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/"
-          gcloud storage cp \
-            --cache-control="public,max-age=31536000,immutable" \
-            dist/manifest.json \
-            "gs://$RELEASE_BUCKET/releases/$GITHUB_SHA/manifest.json"
+            --no-progress
 
       - name: Update latest release
         run: |
-          gcloud storage cp \
+          aws s3 cp dist/ "s3://$R2_BUCKET/latest/" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --recursive \
+            --exclude "*" \
+            --include "*.tar.gz" \
+            --include "*.zip" \
+            --include "checksums.sha256" \
+            --include "manifest.json" \
             --cache-control="public,no-cache,max-age=0" \
-            dist/*.tar.gz dist/*.zip dist/checksums.sha256 \
-            "gs://$RELEASE_BUCKET/latest/"
-          gcloud storage cp \
-            --cache-control="public,no-cache,max-age=0" \
-            dist/manifest.json \
-            "gs://$RELEASE_BUCKET/latest/manifest.json"
+            --no-progress
+
+      - name: Verify published release
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 2 --retry-all-errors \
+            "$DOWNLOAD_BASE_URL/releases/$GITHUB_SHA/manifest.json" \
+            | jq --exit-status \
+                --arg commit "$GITHUB_SHA" \
+                --arg bucket "r2://$R2_BUCKET" \
+                '.commit == $commit and .bucket == $bucket'
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 2 --retry-all-errors \
+            "$DOWNLOAD_BASE_URL/latest/manifest.json" \
+            | jq --exit-status --arg commit "$GITHUB_SHA" '.commit == $commit'

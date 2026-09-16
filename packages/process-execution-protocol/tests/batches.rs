@@ -101,6 +101,61 @@ async fn parallel_input_and_eof_can_complete_an_observation_in_the_same_batch() 
 }
 
 #[tokio::test]
+async fn accepted_error_codes_do_not_fail_or_stop_a_batch() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = ProcessExecutionCore::new(Config::new(directory.path())).unwrap();
+    let dispatcher = Dispatcher::local(core.clone(), version_info("test", "0"));
+
+    let accepted = dispatch(
+        &dispatcher,
+        json!({
+            "mode": "sequential",
+            "accepted_error_codes": ["not_found"],
+            "operations": [
+                {
+                    "request_id": "optional",
+                    "operation": "filesystem.read_file",
+                    "params": {"path": "missing.txt"}
+                },
+                {"request_id": "continued", "operation": "runtime.info"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(accepted["result"]["succeeded"], true);
+    assert_eq!(
+        accepted["result"]["results"][0]["error"]["code"],
+        "not_found"
+    );
+    assert_eq!(accepted["result"]["results"][1]["status"], "ok");
+
+    let rejected = dispatch(
+        &dispatcher,
+        json!({
+            "mode": "sequential",
+            "accepted_error_codes": ["not_found"],
+            "operations": [
+                {
+                    "request_id": "invalid",
+                    "operation": "filesystem.read_file",
+                    "params": {"path": "missing.txt", "max_bytes": 0}
+                },
+                {"request_id": "skipped", "operation": "runtime.info"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["succeeded"], false);
+    assert_eq!(
+        rejected["result"]["results"][0]["error"]["code"],
+        "invalid_argument"
+    );
+    assert_eq!(rejected["result"]["results"][1]["status"], "skipped");
+
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_batches_and_generation_fences_have_no_side_effects() {
     let (core, dispatcher) = runtime();
     for operations in [

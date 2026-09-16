@@ -11,6 +11,17 @@ fn request_validation_preserves_protocol_semantics() {
     .unwrap();
     assert_eq!(normalized["mode"], "sequential");
     assert_eq!(normalized["operations"][1]["params"]["limit"], 50);
+    let accepted = jobs::normalize(json!({
+        "mode": "parallel",
+        "accepted_error_codes": ["not_found"],
+        "operations": [{
+            "request_id": "optional",
+            "operation": "filesystem.read_file",
+            "params": {"path": "optional.txt"}
+        }]
+    }))
+    .unwrap();
+    assert_eq!(accepted["accepted_error_codes"], json!(["not_found"]));
     let filesystem = jobs::normalize(json!({
         "operation":"filesystem.write_file",
         "params":{
@@ -34,6 +45,8 @@ fn request_validation_preserves_protocol_semantics() {
         json!({"operations":[{"request_id":"a","operation":"runtime.info"},{"request_id":"a","operation":"runtime.info"}]}),
         json!({"operations":[{"request_id":"a","operations":[]}]}),
         json!({"mode":"unsupported","operations":[{"request_id":"a","operation":"runtime.info"}]}),
+        json!({"accepted_error_codes":["unknown"],"operations":[{"request_id":"a","operation":"runtime.info"}]}),
+        json!({"accepted_error_codes":["not_found"],"operation":"runtime.info"}),
     ] {
         assert!(jobs::normalize(invalid).is_err());
     }

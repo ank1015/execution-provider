@@ -21,7 +21,7 @@ impl<'de> Deserialize<'de> for Payload {
             .ok_or_else(|| D::Error::custom("request must be an object"))?;
         let batch = object.contains_key("operations");
         let allowed = if batch {
-            &["mode", "operations"][..]
+            &["mode", "accepted_error_codes", "operations"][..]
         } else {
             &["operation", "params"][..]
         };
@@ -52,6 +52,11 @@ pub enum BatchMode {
 pub struct Batch {
     #[serde(default)]
     pub mode: BatchMode,
+    /// Per-item operation errors that are expected by the caller. They remain
+    /// encoded as error outcomes, but do not fail the batch or stop sequential
+    /// dispatch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_error_codes: Vec<core::ErrorCode>,
     pub operations: Vec<BatchOperation>,
 }
 
@@ -212,6 +217,7 @@ impl Dispatcher {
     }
 
     async fn batch(&self, batch: Batch) -> core::Result<Value> {
+        let accepted_error_codes = batch.accepted_error_codes;
         let results: Vec<OperationResponse> = match batch.mode {
             BatchMode::Parallel => {
                 stream::iter(batch.operations)
@@ -234,7 +240,7 @@ impl Dispatcher {
                     } else {
                         self.item(item).await
                     };
-                    failed |= matches!(response.outcome, OperationOutcome::Error { .. });
+                    failed |= !outcome_succeeded(&response.outcome, &accepted_error_codes);
                     results.push(response);
                 }
                 results
@@ -242,8 +248,16 @@ impl Dispatcher {
         };
         let succeeded = results
             .iter()
-            .all(|item| matches!(item.outcome, OperationOutcome::Ok { .. }));
+            .all(|item| outcome_succeeded(&item.outcome, &accepted_error_codes));
         Ok(json!({"succeeded": succeeded, "results": results}))
+    }
+}
+
+fn outcome_succeeded(outcome: &OperationOutcome, accepted_error_codes: &[core::ErrorCode]) -> bool {
+    match outcome {
+        OperationOutcome::Ok { .. } => true,
+        OperationOutcome::Error { error } => accepted_error_codes.contains(&error.code),
+        OperationOutcome::Skipped { .. } => false,
     }
 }
 
