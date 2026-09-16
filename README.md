@@ -30,9 +30,10 @@ This repository is a Cargo workspace for multiple Rust applications and reusable
 ## Binary releases
 
 Changes to either execution binary on `main` publish Linux x86-64, Windows x86-64,
-and universal macOS archives at [downloads.acentric.dev](https://downloads.acentric.dev).
-Each release includes SHA-256 checksums and a JSON manifest under both an immutable
-`releases/COMMIT_SHA/` path and `latest/`.
+and universal macOS archives to Cloudflare R2 at
+[downloads.acentric.dev](https://downloads.acentric.dev). Each release includes SHA-256
+checksums and a JSON manifest under both an immutable `releases/COMMIT_SHA/` path and
+`latest/`.
 
 Create a new application:
 
