@@ -106,6 +106,7 @@ failures exit with code 2; a local Ctrl-C or Unix SIGTERM shuts down cleanly wit
   "execution": {
     "cwd": ".",
     "env": {"EXAMPLE": "value"},
+    "shell_snapshot": {"enabled": true, "max_cached_scopes": 64},
     "limits": {
       "max_active_executions": 64,
       "max_retained_output_bytes": 1048576,

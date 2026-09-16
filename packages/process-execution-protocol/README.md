@@ -1,12 +1,13 @@
 # process-execution-protocol
 
-Shared version 2 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
+Shared version 3 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
 batching. Both `process-execution` and `process-execution-host-daemon` use this crate.
 It embeds no network transport and owns no processes independently of the supplied core.
 
-The [execution API reference](../../apps/process-execution/README.md#protocol-version-2)
-documents the existing single-operation requests and responses. Their JSON format is
-unchanged. `runtime_config::RuntimeConfig` provides the common JSON configuration
+The [execution API reference](../../apps/process-execution/README.md#protocol-version-3)
+documents the single-operation requests and responses. Version 3 adds the optional
+`execution.start.params.shell_snapshot` request and advertises its runtime capability.
+`runtime_config::RuntimeConfig` provides the common JSON configuration
 for an embedded core.
 
 ## Dispatch
@@ -27,7 +28,7 @@ Send `operations` instead of `operation`/`params`:
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "request_id": "batch-1",
   "mode": "parallel",
   "operations": [
@@ -82,7 +83,7 @@ must still be considered before pausing it.
 
 ## Gateway transport contract
 
-`gateway::{HostMessage, GatewayMessage}` defines the version 2 handshake:
+`gateway::{HostMessage, GatewayMessage}` defines the version 3 handshake:
 
 1. The daemon connects to `wss://GATEWAY/BASE/v1/machines/MACHINE_ID/connect`, authenticating
    with an `Authorization: Bearer ...` header. It sends a `hello` containing protocol
