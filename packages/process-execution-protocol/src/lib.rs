@@ -14,7 +14,7 @@ pub mod runtime_config;
 pub use batch::*;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,6 +115,8 @@ pub struct StartParams {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_snapshot: Option<core::ShellSnapshotRequest>,
     #[serde(default)]
     pub io: core::IoMode,
     #[serde(default)]
@@ -234,6 +236,7 @@ async fn dispatch_operation(
                     command: params.command,
                     cwd: params.cwd,
                     env: params.env,
+                    shell_snapshot: params.shell_snapshot,
                     io: params.io,
                     wait_ms: params.wait_ms,
                     max_output_bytes: params.max_output_bytes,
