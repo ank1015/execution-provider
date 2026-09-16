@@ -1,7 +1,7 @@
 use crate::{
     backend,
     session::{self, Session},
-    shell, *,
+    shell, shell_snapshot, *,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -22,6 +22,8 @@ pub(crate) struct Inner {
     registry: Mutex<Registry>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) file_mutations: tokio::sync::Mutex<FileMutationRegistry>,
+    shell_snapshots: shell_snapshot::ShellSnapshotCache,
+    configured_env: BTreeMap<String, String>,
 }
 
 struct Registry {
@@ -47,6 +49,7 @@ impl ProcessExecutionCore {
     /// Must be called inside a Tokio runtime. Environment defaults are captured here.
     pub fn new(mut config: Config) -> Result<Self> {
         config.limits.validate()?;
+        config.shell_snapshot.validate()?;
         if !config.cwd.is_absolute() {
             config.cwd = std::env::current_dir()?.join(&config.cwd);
         }
@@ -58,6 +61,7 @@ impl ProcessExecutionCore {
             None => shell::discover()?,
         };
         validate_env(&config.env)?;
+        let configured_env = config.env.clone();
         let mut env: BTreeMap<String, String> = std::env::vars_os()
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
             .collect();
@@ -75,7 +79,14 @@ impl ProcessExecutionCore {
                 conditional_mutations: true,
                 atomic_replace: true,
             },
+            shell_snapshot: ShellSnapshotCapabilities {
+                enabled: config.shell_snapshot.enabled,
+                supported: cfg!(unix),
+                max_scope_id_bytes: shell_snapshot::MAX_SCOPE_ID_BYTES,
+            },
         };
+        let shell_snapshots =
+            shell_snapshot::ShellSnapshotCache::new(config.shell_snapshot.clone());
         let core = Self(Arc::new(Inner {
             config,
             info,
@@ -88,6 +99,8 @@ impl ProcessExecutionCore {
             }),
             shutdown: CancellationToken::new(),
             file_mutations: tokio::sync::Mutex::new(FileMutationRegistry::default()),
+            shell_snapshots,
+            configured_env,
         }));
         let weak = Arc::downgrade(&core.0);
         let period = (core.0.config.limits.finished_retention / 2)
@@ -123,6 +136,56 @@ impl ProcessExecutionCore {
             validate_size(rows, cols)?;
         }
         validate_env(&request.env)?;
+        if let Some(snapshot) = &request.shell_snapshot {
+            shell_snapshot::validate_scope_id(&snapshot.scope_id)?;
+        }
+        let (mut executable, mut args, resolved_shell) =
+            shell::prepare(&request.command, &self.0.info.default_shell)?;
+        let cwd = match &request.cwd {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => self.0.config.cwd.join(path),
+            None => self.0.config.cwd.clone(),
+        };
+        let mut env = self.0.config.env.clone();
+        let selected_shell = resolved_shell
+            .as_ref()
+            .unwrap_or(&self.0.info.default_shell);
+        let snapshot = if let Some(snapshot_request) = &request.shell_snapshot {
+            self.0
+                .shell_snapshots
+                .get(
+                    &snapshot_request.scope_id,
+                    selected_shell,
+                    &cwd,
+                    &self.0.config.env,
+                )
+                .await
+                .ok()
+        } else {
+            None
+        };
+        if let Some(snapshot) = &snapshot {
+            merge_env(&mut env, snapshot.env.clone());
+        }
+        // Explicit runtime configuration and per-start values always beat profile values.
+        merge_env(&mut env, self.0.configured_env.clone());
+        merge_env(&mut env, request.env.clone());
+        if let (Command::Shell { script, .. }, Some(snapshot)) = (&request.command, &snapshot) {
+            let wrapped = shell_snapshot::install_state(&mut env, &snapshot.state, script);
+            let selected = resolved_shell
+                .as_ref()
+                .expect("shell commands always resolve a shell");
+            let prepared = shell::prepare_resolved(selected, &wrapped, false);
+            executable = prepared.0;
+            args = prepared.1;
+        }
+        let launch = backend::Launch {
+            executable,
+            args,
+            cwd: cwd.clone(),
+            env,
+            io: request.io,
+        };
         let (session, retry) = {
             let mut registry = self.0.registry.lock().unwrap();
             registry.cleanup(self.0.config.limits.finished_retention);
@@ -155,22 +218,6 @@ impl ProcessExecutionCore {
                         "execution capacity reached",
                     ));
                 }
-                let (executable, args, resolved_shell) =
-                    shell::prepare(&request.command, &self.0.info.default_shell)?;
-                let cwd = match &request.cwd {
-                    Some(path) if path.is_absolute() => path.clone(),
-                    Some(path) => self.0.config.cwd.join(path),
-                    None => self.0.config.cwd.clone(),
-                };
-                let mut env = self.0.config.env.clone();
-                merge_env(&mut env, request.env.clone());
-                let launch = backend::Launch {
-                    executable,
-                    args,
-                    cwd: cwd.clone(),
-                    env,
-                    io: request.io,
-                };
                 let execution = Execution {
                     handle: ExecutionHandle {
                         id: Uuid::new_v4(),

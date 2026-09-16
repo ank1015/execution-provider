@@ -126,3 +126,22 @@ pub(crate) fn prepare(
         }
     }
 }
+
+pub(crate) fn prepare_resolved(
+    selected: &Shell,
+    script: &str,
+    login: bool,
+) -> (PathBuf, Vec<OsString>) {
+    let args: Vec<&str> = match selected.kind {
+        ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
+            vec![if login { "-lc" } else { "-c" }, script]
+        }
+        ShellKind::PowerShell if login => vec!["-Command", script],
+        ShellKind::PowerShell => vec!["-NoProfile", "-Command", script],
+        ShellKind::Cmd => vec!["/d", "/s", "/c", script],
+    };
+    (
+        selected.executable.clone(),
+        args.into_iter().map(OsString::from).collect(),
+    )
+}

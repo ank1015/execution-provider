@@ -10,6 +10,7 @@ pub struct Config {
     pub cwd: PathBuf,
     pub default_shell: Option<Shell>,
     pub env: BTreeMap<String, String>,
+    pub shell_snapshot: ShellSnapshotConfig,
     pub limits: Limits,
 }
 
@@ -19,8 +20,59 @@ impl Config {
             cwd: cwd.into(),
             default_shell: None,
             env: BTreeMap::new(),
+            shell_snapshot: ShellSnapshotConfig::default(),
             limits: Limits::default(),
         }
+    }
+}
+
+/// Bounds and retry behavior for interactive shell-profile snapshots.
+#[derive(Debug, Clone)]
+pub struct ShellSnapshotConfig {
+    /// Enables snapshot requests. Commands that do not request a snapshot are unchanged.
+    pub enabled: bool,
+    /// Maximum number of successful or retryable scope entries retained in memory.
+    pub max_cached_scopes: usize,
+    /// Maximum time allowed for profile loading and state capture.
+    pub capture_timeout: Duration,
+    /// Maximum stdout accepted from the capture shell.
+    pub max_capture_bytes: usize,
+    /// Maximum replayable shell-state section accepted from a snapshot.
+    pub max_state_bytes: usize,
+    /// Delay before a failed scope may attempt capture again.
+    pub retry_backoff: Duration,
+}
+
+impl Default for ShellSnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_cached_scopes: 64,
+            capture_timeout: Duration::from_secs(10),
+            max_capture_bytes: 4 * 1024 * 1024,
+            max_state_bytes: 512 * 1024,
+            retry_backoff: Duration::from_secs(1),
+        }
+    }
+}
+
+impl ShellSnapshotConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.max_cached_scopes == 0 || self.max_capture_bytes == 0 || self.max_state_bytes == 0 {
+            return Err(Error::invalid("shell snapshot limits must be positive"));
+        }
+        if self.capture_timeout.is_zero() {
+            return Err(Error::invalid("shell snapshot timeout must be positive"));
+        }
+        if self.max_state_bytes > self.max_capture_bytes {
+            return Err(Error::invalid(
+                "shell snapshot state limit exceeds capture limit",
+            ));
+        }
+        if self.max_capture_bytes == usize::MAX {
+            return Err(Error::invalid("shell snapshot capture limit is too large"));
+        }
+        Ok(())
     }
 }
 

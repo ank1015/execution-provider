@@ -8,7 +8,7 @@ pub struct ExecutionHandle {
     pub generation_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellKind {
     Sh,
@@ -125,6 +125,8 @@ pub struct StartRequest {
     pub command: Command,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    /// Requests one cached interactive-profile snapshot for this logical scope.
+    pub shell_snapshot: Option<ShellSnapshotRequest>,
     pub io: IoMode,
     pub wait_ms: u64,
     pub max_output_bytes: Option<usize>,
@@ -138,12 +140,19 @@ impl StartRequest {
             command,
             cwd: None,
             env: BTreeMap::new(),
+            shell_snapshot: None,
             io: IoMode::default(),
             wait_ms: 0,
             max_output_bytes: None,
             labels: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSnapshotRequest {
+    /// A stable session or workspace identifier. It is a cache boundary, not shell input.
+    pub scope_id: String,
 }
 
 /// An opaque position within one execution's retained output and lifecycle.
@@ -278,6 +287,14 @@ pub struct RuntimeInfo {
     pub pipe_interrupt: bool,
     pub terminal_interrupt: bool,
     pub filesystem: FileSystemCapabilities,
+    pub shell_snapshot: ShellSnapshotCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSnapshotCapabilities {
+    pub enabled: bool,
+    pub supported: bool,
+    pub max_scope_id_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
