@@ -106,6 +106,34 @@ pub fn replace(from: &Path, to: &Path) -> Result<()> {
     })
 }
 
+pub fn wait_for_process(pid: u32) -> Result<()> {
+    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let result = unsafe { WaitForSingleObject(handle.as_raw_handle(), 120_000) };
+    match result {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err("timed out waiting for the updater parent process".into()),
+        _ => Err(std::io::Error::last_os_error().into()),
+    }
+}
+
+pub fn delete_on_reboot(path: impl AsRef<Path>) -> Result<()> {
+    check(unsafe {
+        MoveFileExW(
+            wide(path.as_ref()).as_ptr(),
+            ptr::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    })
+}
+
 fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
 }

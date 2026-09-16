@@ -39,7 +39,7 @@ machine ID and single-use registration token to the daemon, then run:
 ```sh
 process-execution-host-daemon register \
   --machine-id 00000000-0000-0000-0000-000000000001 < /path/to/private-token.txt
-process-execution-host-daemon run
+process-execution-host-daemon connect
 ```
 
 The example machine UUID is a placeholder. The registration token is one ASCII line on stdin;
@@ -61,7 +61,9 @@ The gateway connection URL is derived from the base URL as
 the gateway using the operating system's trusted roots. The host credential identifies
 the device to the gateway.
 
-`run --gateway-url URL` overrides the configured base URL, but it must match the gateway
+`connect` installs the daemon as a service for the current user, starts it immediately,
+and starts it again at future logins. `run` remains available for foreground use and
+troubleshooting. `run --gateway-url URL` overrides the configured base URL, but it must match the gateway
 bound to the stored credential. To change gateways, stop the daemon and register with the new gateway. There is no automatic credential forwarding or
 fallback to an unrelated server.
 
@@ -72,6 +74,9 @@ fallback to an unrelated server.
 | `register [--gateway-url URL] --machine-id UUID` | Exchange the registration token from stdin and save the machine credential |
 | `configure [--gateway-url URL] --machine-id UUID` | Save an already-issued machine credential from stdin (`--host-id` remains an alias) |
 | `run [--gateway-url URL] [--config FILE]` | Maintain the connection and serve execution requests |
+| `connect [--config FILE]` | Install, enable, and start the current binary as this user's login service |
+| `disconnect` | Stop and disable the login service while retaining registration |
+| `update [--manifest-url URL]` | Download, verify, and install the latest published daemon; restart it only when it was running |
 | `status` | Print configuration presence, whether the state lock is held, and the last runtime/connection status |
 | `version` | Print binary, execution protocol, OS, and architecture versions |
 
@@ -173,44 +178,34 @@ stored for inspection/replacement. Local shutdown also terminates owned work and
 for cleanup. Abrupt daemon termination cannot perform graceful cleanup or recover its
 in-memory records on restart.
 
-## Start automatically under the user account
+## User service and updates
 
-Register and verify the daemon first, then use the OS's user startup facilities. The
-binary itself does not install or modify a service automatically.
+`connect` manages the native, non-elevated startup mechanism for the current user:
 
-On Linux, create `~/.config/systemd/user/process-execution-host.service` with absolute
-paths for the executable and configuration:
+- Linux: a systemd user unit at
+  `~/.config/systemd/user/process-execution-host.service`.
+- macOS: a LaunchAgent named `dev.acentric.process-execution-host-daemon`.
+- Windows: a limited Task Scheduler task named `Acentric Process Execution Host`.
 
-```ini
-[Unit]
-Description=Process execution host
+The generated service always uses absolute paths for the current executable, state
+directory, and optional `--config` file. Move the binary before running `connect`; moving
+it afterward leaves the service pointing at the old path. `disconnect` is idempotent and
+does not delete credentials. The daemon performs network reconnection itself. Service
+restart loops are disabled for configuration, authentication, and protocol failures that
+exit with code 2.
 
-[Service]
-ExecStart=/absolute/path/process-execution-host-daemon run --config /absolute/path/host.json
-Restart=on-failure
-RestartSec=5
-RestartPreventExitStatus=2
+`update` reads `https://downloads.acentric.dev/latest/manifest.json`, chooses the archive
+for the current OS and architecture, verifies the declared byte length and SHA-256 digest,
+extracts only the daemon executable, and atomically replaces the running installation.
+Only HTTPS manifest and artifact URLs are accepted. If the user service is running, it is
+stopped for replacement and started again; a disconnected installation remains
+disconnected. Windows completes replacement in a short-lived helper process after the
+CLI exits, because Windows does not allow an executing `.exe` to replace itself.
 
-[Install]
-WantedBy=default.target
-```
-
-Then run `systemctl --user daemon-reload` and
-`systemctl --user enable --now process-execution-host.service`. Stop it with
-`systemctl --user disable --now process-execution-host.service`.
-
-On macOS, use a user LaunchAgent with `RunAtLoad: true`, absolute `ProgramArguments`
-for the binary and `run --config /absolute/path/host.json`, and `KeepAlive: false`.
-The daemon handles network retries internally. Load/unload it with `launchctl bootstrap`
-and `launchctl bootout` for the user's GUI domain. Keeping unconditional restart disabled
-prevents a revoked credential from producing a service restart loop.
-
-On Windows, create a Task Scheduler task for the current user at logon, using the installed
-`.exe` and arguments `run --config "C:\absolute\host.json"`. Do not request elevated
-privileges. Disable the task before replacing configuration or removing the binary.
-
-These are user-session startup options. Machine-wide services, signed installers, and
-automatic updates are separate deployment work.
+Published automatic-update targets are Linux x86-64, universal macOS (Intel and Apple
+Silicon), and Windows x86-64. A user-writable installation location such as
+`~/.local/bin` is recommended. The managed user service requires no administrator
+privileges; machine-wide service installation is intentionally out of scope.
 
 ## Permissions and verification
 

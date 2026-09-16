@@ -2,7 +2,9 @@ mod config;
 mod connection;
 mod receipts;
 mod registration;
+mod service;
 mod store;
+mod update;
 #[cfg(windows)]
 mod windows;
 
@@ -60,10 +62,35 @@ enum Command {
         #[arg(long)]
         allow_insecure_loopback: bool,
     },
+    /// Install and start the daemon for this user's login session.
+    Connect {
+        /// Optional runtime configuration file to use on every start.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Stop and disable the daemon without removing its registration.
+    Disconnect,
+    /// Install the latest checksum-verified daemon release and restart if connected.
+    Update {
+        #[arg(long, default_value = update::DEFAULT_MANIFEST_URL)]
+        manifest_url: String,
+    },
     /// Print local configuration and last connection status without credentials.
     Status,
     /// Print binary and protocol versions as JSON.
     Version,
+    #[cfg(windows)]
+    #[command(name = "__apply-update", hide = true)]
+    ApplyUpdate {
+        #[arg(long)]
+        parent_pid: u32,
+        #[arg(long)]
+        target: PathBuf,
+        #[arg(long)]
+        replacement: PathBuf,
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 fn version() -> serde_json::Value {
@@ -86,16 +113,48 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         println!("{}", version());
         return Ok(ExitCode::SUCCESS);
     }
-    let directory = match cli.state_dir {
-        Some(path) => path,
-        None => directories::BaseDirs::new()
-            .ok_or("cannot locate the user's application data directory")?
-            .data_local_dir()
-            .join("process-execution-host-daemon"),
-    };
+    let directory = state_directory(cli.state_dir)?;
     if matches!(cli.command, Command::Status) {
         println!("{}", store::inspect(&directory)?);
         return Ok(ExitCode::SUCCESS);
+    }
+    #[cfg(windows)]
+    if let Command::ApplyUpdate {
+        parent_pid,
+        target,
+        replacement,
+        restart,
+    } = &cli.command
+    {
+        update::apply_windows(*parent_pid, target, replacement, &directory, *restart)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    match &cli.command {
+        Command::Connect { config } => {
+            if !store::inspect(&directory)?["configured"]
+                .as_bool()
+                .unwrap_or(false)
+            {
+                return Err("machine is not configured; run register first".into());
+            }
+            let config = config
+                .as_ref()
+                .map(|path| path.canonicalize())
+                .transpose()?;
+            service::Service::new(directory.clone(), config)?.connect()?;
+            println!("{}", serde_json::json!({"connected": true}));
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Disconnect => {
+            service::Service::new(directory.clone(), None)?.disconnect()?;
+            println!("{}", serde_json::json!({"connected": false}));
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Update { manifest_url } => {
+            println!("{}", update::apply(manifest_url, &directory).await?);
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
     }
     let store = store::Store::open(directory)?;
     match cli.command {
@@ -168,8 +227,24 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(ExitCode::from(2))
             }
         }
-        Command::Status | Command::Version => unreachable!(),
+        Command::Status
+        | Command::Version
+        | Command::Connect { .. }
+        | Command::Disconnect
+        | Command::Update { .. } => unreachable!(),
+        #[cfg(windows)]
+        Command::ApplyUpdate { .. } => unreachable!(),
     }
+}
+
+fn state_directory(path: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(match path {
+        Some(path) => path,
+        None => directories::BaseDirs::new()
+            .ok_or("cannot locate the user's application data directory")?
+            .data_local_dir()
+            .join("process-execution-host-daemon"),
+    })
 }
 
 async fn shutdown_signal() -> io::Result<()> {
