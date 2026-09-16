@@ -8,9 +8,10 @@ mod journal;
 mod runtime;
 mod session;
 mod shell;
+mod shell_snapshot;
 mod types;
 
-pub use config::{Config, Limits, MAX_FILE_BYTES};
+pub use config::{Config, Limits, MAX_FILE_BYTES, ShellSnapshotConfig};
 pub use error::{Error, ErrorCode, Result};
 pub use filesystem::*;
 pub use runtime::ProcessExecutionCore;

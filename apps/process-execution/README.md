@@ -47,7 +47,7 @@ In another terminal:
 
 ```sh
 process-execution health --endpoint "$HOME/.process-execution/runtime.sock"
-printf '%s\n' '{"protocol_version":2,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
+printf '%s\n' '{"protocol_version":3,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
   process-execution rpc --endpoint "$HOME/.process-execution/runtime.sock"
 ```
 
@@ -61,7 +61,7 @@ In another PowerShell terminal:
 
 ```powershell
 process-execution.exe health --endpoint '\\.\pipe\process-execution'
-'{"protocol_version":2,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
+'{"protocol_version":3,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
   process-execution.exe rpc --endpoint '\\.\pipe\process-execution'
 ```
 
@@ -105,7 +105,7 @@ and exits with code 1. Local parsing, transport, or timeout errors print a diagn
 to stderr and exit with code 1; CLI usage errors exit with code 2. A managed command's
 nonzero exit code is an execution result, not an RPC failure.
 
-## Protocol version 2
+## Protocol version 3
 
 The shared [process-execution-protocol](../../packages/process-execution-protocol/README.md)
 package owns request/response types and dispatch. Single-operation requests remain
@@ -118,7 +118,7 @@ Every request has this envelope:
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "request_id": "unique-correlation-id",
   "expected_generation_id": "UUID-from-health",
   "operation": "execution.get",
@@ -137,7 +137,7 @@ Successful responses have `status: "ok"` and `result`:
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "request_id": "unique-correlation-id",
   "generation_id": "supervisor-UUID",
   "status": "ok",
@@ -176,6 +176,7 @@ Start parameters:
   "command": {"type": "program", "executable": "cargo", "args": ["build"]},
   "cwd": "relative/to/server-cwd",
   "env": {"EXAMPLE": "value"},
+  "shell_snapshot": {"scope_id": "stable-session-id"},
   "io": {"type": "pipes", "stdin": false},
   "wait_ms": 1000,
   "max_output_bytes": 65536,
@@ -187,6 +188,12 @@ Only `start_id` and `command` are required. Defaults are the configured cwd/envi
 closed piped stdin, zero wait, the core output limit, and no labels. `program` passes
 arguments directly; `args` defaults to an empty array. For an interactive terminal,
 use `io: {"type": "pty", "rows": 24, "cols": 80}`.
+
+`shell_snapshot` is optional. When supplied, the Unix host loads and caches the selected
+user shell's interactive profile for that stable scope. Its environment and shell state
+are applied before the command, while values in `env` still win. Capture failures do not
+fail the command. Use a session/workspace identity as `scope_id`; do not put shell code or
+secrets in it.
 
 For shell syntax, use `command: {"type": "shell", "script": "echo hello"}`. The optional
 `shell` object specifies `executable` and `kind` (`sh`, `bash`, `zsh`, `power_shell`,
@@ -239,7 +246,7 @@ flags returned by `health` and terminate when appropriate.
 process cleanup, and releases the endpoint. For example, submit this through `rpc`:
 
 ```json
-{"protocol_version":2,"request_id":"shutdown-1","operation":"runtime.shutdown"}
+{"protocol_version":3,"request_id":"shutdown-1","operation":"runtime.shutdown"}
 ```
 
 Abruptly killing the supervisor cannot run graceful shutdown. Output, retry records,
@@ -255,6 +262,14 @@ responsibility of the outer host/provider.
 {
   "cwd": ".",
   "env": {"EXAMPLE": "value"},
+  "shell_snapshot": {
+    "enabled": true,
+    "max_cached_scopes": 64,
+    "capture_timeout_ms": 10000,
+    "max_capture_bytes": 4194304,
+    "max_state_bytes": 524288,
+    "retry_backoff_ms": 1000
+  },
   "limits": {
     "max_active_executions": 64,
     "max_retained_executions": 1024,

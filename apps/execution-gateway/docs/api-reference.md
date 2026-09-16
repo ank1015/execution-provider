@@ -445,7 +445,7 @@ A successful daemon response has this envelope:
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "request_id": "00000000-0000-0000-0000-000000000004",
   "generation_id": "00000000-0000-0000-0000-000000000005",
   "status": "ok",
@@ -504,6 +504,7 @@ Start parameters are:
   },
   "cwd": "optional/path",
   "env": {"EXAMPLE": "value"},
+  "shell_snapshot": {"scope_id": "stable-session-id"},
   "io": {"type": "pipes", "stdin": false},
   "wait_ms": 1000,
   "max_output_bytes": 65536,
@@ -514,6 +515,11 @@ Start parameters are:
 Only `start_id` and `command` are required. A direct program command uses
 `{"type":"program","executable":"...","args":[]}`. A PTY uses
 `{"type":"pty","rows":24,"cols":80}`.
+
+`shell_snapshot` is optional. It asks a compatible Unix host to load and cache the
+selected user's interactive shell profile for the stable scope before launching the
+command. Per-start `env` values override captured values. The gateway transports the
+request and never receives or stores the captured environment or shell state.
 
 Observations contain an execution snapshot, output chunks, `next_cursor`, `has_more`,
 `output_gap`, and `return_reason`. Output and input bytes use standard padded base64.

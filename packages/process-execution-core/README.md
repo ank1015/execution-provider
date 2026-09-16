@@ -81,10 +81,23 @@ resolved shell. `login` defaults to false through `Command::shell`: Unix shells 
 true); cmd uses `/d /s /c`. Supporting several operating systems does not translate
 scripts between their shell languages.
 
-The runtime captures its environment at construction, merges `Config.env`, then
-merges execution-specific overrides at launch. Overrides use case-insensitive names
-on Windows. Environment values are not returned in snapshots or listings. Relative
-execution working directories resolve against the configured working directory.
+The runtime captures its environment at construction. A start may additionally request
+an interactive shell snapshot using a stable `ShellSnapshotRequest.scope_id`. On Unix,
+the runtime starts the selected login shell, explicitly sources `.zshrc`, `.bashrc`, or
+`$ENV` as appropriate, and captures its exported environment, functions, options, and
+aliases. Shell state is restored before parsing the requested script; direct programs
+receive the captured environment. This makes tools installed by user profile managers
+available even when the host daemon itself was launched non-interactively.
+
+Snapshots are cached in memory by scope, selected shell, and cwd. Capture is time- and
+size-bounded, successful entries are LRU-bounded, and failed captures back off before
+retrying. Failure is fail-open: the requested command still starts with the ordinary
+runtime environment. PowerShell and cmd snapshots are currently unsupported. Captured
+values never appear in runtime information, execution snapshots, or gateway responses.
+
+Environment precedence is daemon environment, captured profile, explicit `Config.env`,
+then execution-specific overrides. Overrides use case-insensitive names on Windows.
+Relative execution working directories resolve against the configured working directory.
 
 ## Lifecycle and output
 

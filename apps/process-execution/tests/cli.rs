@@ -370,6 +370,8 @@ async fn shell_commands_use_the_discovered_shell() {
         result["execution"]["resolved_shell"],
         info["runtime"]["default_shell"]
     );
+    assert_eq!(info["runtime"]["shell_snapshot"]["enabled"], true);
+    assert_eq!(info["runtime"]["shell_snapshot"]["max_scope_id_bytes"], 256);
 }
 
 #[tokio::test]

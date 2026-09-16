@@ -12,7 +12,19 @@ pub struct RuntimeConfig {
     cwd: Option<PathBuf>,
     default_shell: Option<Shell>,
     env: BTreeMap<String, String>,
+    shell_snapshot: ShellSnapshotOverrides,
     limits: LimitOverrides,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ShellSnapshotOverrides {
+    enabled: Option<bool>,
+    max_cached_scopes: Option<usize>,
+    capture_timeout_ms: Option<u64>,
+    max_capture_bytes: Option<usize>,
+    max_state_bytes: Option<usize>,
+    retry_backoff_ms: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -48,8 +60,32 @@ impl RuntimeConfig {
         let mut config = Config::new(cwd.or(self.cwd).unwrap_or(std::env::current_dir()?));
         config.default_shell = self.default_shell;
         config.env = self.env;
+        self.shell_snapshot.apply(&mut config.shell_snapshot);
         self.limits.apply(&mut config.limits);
         Ok(config)
+    }
+}
+
+impl ShellSnapshotOverrides {
+    fn apply(self, config: &mut process_execution_core::ShellSnapshotConfig) {
+        if let Some(value) = self.enabled {
+            config.enabled = value;
+        }
+        if let Some(value) = self.max_cached_scopes {
+            config.max_cached_scopes = value;
+        }
+        if let Some(value) = self.capture_timeout_ms {
+            config.capture_timeout = Duration::from_millis(value);
+        }
+        if let Some(value) = self.max_capture_bytes {
+            config.max_capture_bytes = value;
+        }
+        if let Some(value) = self.max_state_bytes {
+            config.max_state_bytes = value;
+        }
+        if let Some(value) = self.retry_backoff_ms {
+            config.retry_backoff = Duration::from_millis(value);
+        }
     }
 }
 
@@ -101,5 +137,40 @@ impl LimitOverrides {
         if let Some(v) = self.max_file_mutation_receipts {
             limits.max_file_mutation_receipts = v;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_snapshot_overrides_are_applied() {
+        let parsed: RuntimeConfig = serde_json::from_str(
+            r#"{
+                "shell_snapshot": {
+                    "enabled": false,
+                    "max_cached_scopes": 7,
+                    "capture_timeout_ms": 123,
+                    "max_capture_bytes": 2000,
+                    "max_state_bytes": 1000,
+                    "retry_backoff_ms": 45
+                }
+            }"#,
+        )
+        .unwrap();
+        let config = parsed.into_core(Some(std::env::temp_dir())).unwrap();
+        assert!(!config.shell_snapshot.enabled);
+        assert_eq!(config.shell_snapshot.max_cached_scopes, 7);
+        assert_eq!(
+            config.shell_snapshot.capture_timeout,
+            Duration::from_millis(123)
+        );
+        assert_eq!(config.shell_snapshot.max_capture_bytes, 2000);
+        assert_eq!(config.shell_snapshot.max_state_bytes, 1000);
+        assert_eq!(
+            config.shell_snapshot.retry_backoff,
+            Duration::from_millis(45)
+        );
     }
 }
