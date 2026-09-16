@@ -507,6 +507,202 @@ async fn shell_selection_is_reported_and_explicit_missing_shell_is_an_error() {
 }
 
 #[cfg(unix)]
+fn available_shell(kind: ShellKind, path: &str) -> Option<Shell> {
+    std::path::Path::new(path).is_file().then(|| Shell {
+        executable: path.into(),
+        kind,
+    })
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_snapshot_loads_profile_state_and_caches_per_scope() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(shell) = available_shell(ShellKind::Zsh, "/bin/zsh")
+        .or_else(|| available_shell(ShellKind::Bash, "/bin/bash"))
+    else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("profile-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let tool = bin.join("profile-tool");
+    std::fs::write(&tool, "#!/bin/sh\nprintf profile-tool-ok\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let counter = directory.path().join("profile-loads");
+    let profile = match shell.kind {
+        ShellKind::Zsh => directory.path().join(".zshrc"),
+        ShellKind::Bash => directory.path().join(".bashrc"),
+        _ => unreachable!(),
+    };
+    std::fs::write(
+        profile,
+        format!(
+            "export PATH='{}':$PATH\nprintf x >> '{}'\nsnapshot_function() {{ printf function-ok; }}\nalias snapshot_alias='printf alias-ok'\n",
+            bin.display(),
+            counter.display()
+        ),
+    )
+    .unwrap();
+    let mut configuration = config();
+    configuration.default_shell = Some(shell);
+    configuration
+        .env
+        .insert("HOME".into(), directory.path().display().to_string());
+    let core = ProcessExecutionCore::new(configuration).unwrap();
+
+    for id in ["snapshot-first", "snapshot-second"] {
+        let mut start = StartRequest::new(
+            id,
+            Command::shell("profile-tool; snapshot_function; snapshot_alias"),
+        );
+        start.shell_snapshot = Some(ShellSnapshotRequest {
+            scope_id: "session-one".into(),
+        });
+        start.wait_ms = 1000;
+        let observation = core.start_execution(start).await.unwrap();
+        let output = String::from_utf8(bytes(&observation)).unwrap();
+        assert!(
+            output.contains("profile-tool-okfunction-okalias-ok"),
+            "{output:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&counter).unwrap(), "x");
+
+    let mut direct = StartRequest::new(
+        "snapshot-direct-program",
+        Command::program("profile-tool", std::iter::empty::<&str>()),
+    );
+    direct.shell_snapshot = Some(ShellSnapshotRequest {
+        scope_id: "session-one".into(),
+    });
+    direct.wait_ms = 1000;
+    let observation = core.start_execution(direct).await.unwrap();
+    assert_eq!(
+        String::from_utf8(bytes(&observation)).unwrap(),
+        "profile-tool-ok"
+    );
+
+    let mut start = StartRequest::new("snapshot-third", Command::shell("printf new-scope"));
+    start.shell_snapshot = Some(ShellSnapshotRequest {
+        scope_id: "session-two".into(),
+    });
+    start.wait_ms = 1000;
+    core.start_execution(start).await.unwrap();
+    assert_eq!(std::fs::read_to_string(counter).unwrap(), "xx");
+    core.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_start_environment_overrides_snapshot_environment() {
+    let Some(shell) = available_shell(ShellKind::Zsh, "/bin/zsh")
+        .or_else(|| available_shell(ShellKind::Bash, "/bin/bash"))
+    else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let profile = match shell.kind {
+        ShellKind::Zsh => directory.path().join(".zshrc"),
+        ShellKind::Bash => directory.path().join(".bashrc"),
+        _ => unreachable!(),
+    };
+    std::fs::write(profile, "export SNAPSHOT_PRECEDENCE=profile\n").unwrap();
+    let mut configuration = config();
+    configuration.default_shell = Some(shell);
+    configuration
+        .env
+        .insert("HOME".into(), directory.path().display().to_string());
+    configuration
+        .env
+        .insert("SNAPSHOT_PRECEDENCE".into(), "runtime".into());
+    let core = ProcessExecutionCore::new(configuration).unwrap();
+    let mut start = StartRequest::new(
+        "snapshot-precedence",
+        Command::shell("printf %s \"$SNAPSHOT_PRECEDENCE\""),
+    );
+    start.shell_snapshot = Some(ShellSnapshotRequest {
+        scope_id: "precedence".into(),
+    });
+    start
+        .env
+        .insert("SNAPSHOT_PRECEDENCE".into(), "request".into());
+    start.wait_ms = 1000;
+    let observation = core.start_execution(start).await.unwrap();
+    assert_eq!(String::from_utf8(bytes(&observation)).unwrap(), "request");
+    core.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_snapshot_expands_profile_aliases() {
+    let Some(shell) = available_shell(ShellKind::Bash, "/bin/bash") else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join(".bashrc"),
+        "alias snapshot_alias='printf bash-alias-ok'\n",
+    )
+    .unwrap();
+    let mut configuration = config();
+    configuration.default_shell = Some(shell);
+    configuration
+        .env
+        .insert("HOME".into(), directory.path().display().to_string());
+    let core = ProcessExecutionCore::new(configuration).unwrap();
+    let mut start = StartRequest::new("bash-alias", Command::shell("snapshot_alias"));
+    start.shell_snapshot = Some(ShellSnapshotRequest {
+        scope_id: "bash-alias".into(),
+    });
+    start.wait_ms = 1000;
+    let observation = core.start_execution(start).await.unwrap();
+    assert_eq!(
+        String::from_utf8(bytes(&observation)).unwrap(),
+        "bash-alias-ok"
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn snapshot_timeout_fails_open_and_does_not_block_execution() {
+    let Some(shell) = available_shell(ShellKind::Zsh, "/bin/zsh")
+        .or_else(|| available_shell(ShellKind::Bash, "/bin/bash"))
+    else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let profile = match shell.kind {
+        ShellKind::Zsh => directory.path().join(".zshrc"),
+        ShellKind::Bash => directory.path().join(".bashrc"),
+        _ => unreachable!(),
+    };
+    std::fs::write(profile, "sleep 5\n").unwrap();
+    let mut configuration = config();
+    configuration.default_shell = Some(shell);
+    configuration.shell_snapshot.capture_timeout = Duration::from_millis(30);
+    configuration
+        .env
+        .insert("HOME".into(), directory.path().display().to_string());
+    let core = ProcessExecutionCore::new(configuration).unwrap();
+    let mut start = StartRequest::new("snapshot-timeout", Command::shell("printf fallback-ok"));
+    start.shell_snapshot = Some(ShellSnapshotRequest {
+        scope_id: "timeout".into(),
+    });
+    start.wait_ms = 1000;
+    let before = std::time::Instant::now();
+    let observation = core.start_execution(start).await.unwrap();
+    assert!(before.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        String::from_utf8(bytes(&observation)).unwrap(),
+        "fallback-ok"
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn terminate_escalates_when_sigterm_is_ignored() {
     let core = ProcessExecutionCore::new(config()).unwrap();
