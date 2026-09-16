@@ -1,7 +1,6 @@
 use crate::Result;
 use std::{
     ffi::OsString,
-    fs,
     path::PathBuf,
     process::{Command, ExitStatus},
 };
@@ -76,7 +75,7 @@ fn run_ignoring_failure(mut command: Command) -> Result<ExitStatus> {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     const LABEL: &str = "dev.acentric.process-execution-host-daemon";
 
@@ -204,6 +203,7 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    use std::fs;
 
     const SERVICE_NAME: &str = "process-execution-host";
 
@@ -262,7 +262,7 @@ mod platform {
 
     fn unit(service: &Service) -> String {
         let mut command = vec![systemd_quote(&service.executable)];
-        command.extend(service.arguments().iter().map(|value| systemd_quote(value)));
+        command.extend(service.arguments().iter().map(systemd_quote));
         format!(
             "[Unit]\nDescription=Acentric process execution host\n\n[Service]\nExecStart={}\nRestart=on-failure\nRestartSec=5\nRestartPreventExitStatus=2\n\n[Install]\nWantedBy=default.target\n",
             command.join(" ")
