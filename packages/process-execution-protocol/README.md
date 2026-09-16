@@ -31,6 +31,7 @@ Send `operations` instead of `operation`/`params`:
   "protocol_version": 3,
   "request_id": "batch-1",
   "mode": "parallel",
+  "accepted_error_codes": ["not_found"],
   "operations": [
     {"request_id": "info", "operation": "runtime.info"},
     {"request_id": "list", "operation": "execution.list", "params": {}}
@@ -48,6 +49,12 @@ the batch. Nested batches, mixed single/batch envelopes, and batched shutdown ar
 - `parallel`: run up to eight operations at once. Errors do not skip other operations.
   Results are returned in input order, regardless of completion order.
 
+`accepted_error_codes` is optional and defaults to an empty list. An operation error
+whose code is listed remains an `error` item in the response, but it counts as successful
+for the outer batch. In sequential mode it also does not skip later operations. This is
+intended for expected outcomes such as probing for an optional file with `not_found`;
+unlisted errors and all skipped operations still fail the batch.
+
 A valid batch returns `status: "ok"` and this result structure:
 
 ```json
@@ -61,10 +68,11 @@ A valid batch returns `status: "ok"` and this result structure:
 }
 ```
 
-`succeeded` is true only when every operation succeeded. The local `rpc` command exits
-with code 1 for a batch containing an error or skip, while still printing its complete
-response. A failed command launch or nonzero command exit remains an execution result,
-not an operation error, as with single requests.
+`succeeded` is true only when every operation succeeded or returned an explicitly
+accepted error code. The local `rpc` command exits with code 1 for a batch containing an
+unaccepted error or skip, while still printing its complete response. A failed command
+launch or nonzero command exit remains an execution result, not an operation error, as
+with single requests.
 
 Sequential dispatch orders **operation responses**, not process completion. A start
 can return while its command is still running. Use a shell script such as `build && test`

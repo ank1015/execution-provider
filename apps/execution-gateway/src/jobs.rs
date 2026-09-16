@@ -85,6 +85,7 @@ pub fn normalize(value: Value) -> Result<Value> {
             "operation",
             "params",
             "mode",
+            "accepted_error_codes",
             "operations",
             "expected_generation_id",
         ]
