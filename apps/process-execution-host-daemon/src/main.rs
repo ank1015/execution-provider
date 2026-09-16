@@ -142,6 +142,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .map(|path| path.canonicalize())
                 .transpose()?;
             service::Service::new(directory.clone(), config)?.connect()?;
+            wait_until_running(&directory).await?;
             println!("{}", serde_json::json!({"connected": true}));
             return Ok(ExitCode::SUCCESS);
         }
@@ -245,6 +246,22 @@ fn state_directory(path: Option<PathBuf>) -> Result<PathBuf> {
             .data_local_dir()
             .join("process-execution-host-daemon"),
     })
+}
+
+async fn wait_until_running(directory: &std::path::Path) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if store::inspect(directory)?["running"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("user service did not start within 15 seconds".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn shutdown_signal() -> io::Result<()> {

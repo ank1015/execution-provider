@@ -1,6 +1,6 @@
 [package]
 name = "process-execution-host-daemon"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 description = "User-owned execution host with an authenticated outbound gateway connection"
 
