@@ -338,7 +338,7 @@ impl MachineSocket {
         );
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         socket.send(Message::Text(json!({"type":"hello","protocol_version":process_execution_protocol::VERSION,"installation_id":installation,"host_id":machine,"request_recovery":recovery,
-            "runtime":{"generation_id":generation,"default_shell":{"executable":"sh","kind":"sh"},"pty":true,"pipe_interrupt":true,"terminal_interrupt":true,"filesystem":{"max_read_bytes":5242880,"max_write_bytes":5242880,"conditional_mutations":true,"atomic_replace":true}},
+            "runtime":{"generation_id":generation,"default_shell":{"executable":"sh","kind":"sh"},"pty":true,"pipe_interrupt":true,"terminal_interrupt":true,"filesystem":{"max_read_bytes":5242880,"max_write_bytes":5242880,"conditional_mutations":true,"atomic_replace":true},"shell_snapshot":{"enabled":true,"supported":true,"max_scope_id_bytes":256}},
             "binary":{"binary":"fixture","version":"0.1.0","platform":"test","architecture":"test"}}).to_string().into())).await.unwrap();
         let welcome = timeout(Duration::from_secs(5), socket.next())
             .await
