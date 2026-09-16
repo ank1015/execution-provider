@@ -13,8 +13,11 @@ pub struct Service {
 
 impl Service {
     pub fn new(state_dir: PathBuf, config: Option<PathBuf>) -> Result<Self> {
+        let executable = std::env::current_exe()?;
+        #[cfg(not(windows))]
+        let executable = executable.canonicalize()?;
         Ok(Self {
-            executable: std::env::current_exe()?.canonicalize()?,
+            executable,
             state_dir,
             config,
         })
@@ -303,11 +306,21 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use std::fs;
 
     const TASK_NAME: &str = "Acentric Process Execution Host";
+    const RUNNER_NAME: &str = "service-runner.ps1";
 
     pub fn connect(service: &Service) -> Result<()> {
-        let task_command = windows_command(service);
+        fs::create_dir_all(&service.state_dir)?;
+        let runner = service.state_dir.join(RUNNER_NAME);
+        fs::write(&runner, runner_script(service))?;
+
+        let mut end = Command::new("schtasks.exe");
+        end.args(["/End", "/TN", TASK_NAME]);
+        let _ = run_ignoring_failure(end)?;
+
+        let task_command = task_command(&runner);
         let mut create = Command::new("schtasks.exe");
         create.args([
             "/Create",
@@ -349,10 +362,21 @@ mod platform {
         run(command, "Task Scheduler restart")
     }
 
-    fn windows_command(service: &Service) -> String {
-        let mut command = vec![windows_quote(service.executable.as_os_str())];
-        command.extend(service.arguments().iter().map(windows_quote));
-        command.join(" ")
+    fn runner_script(service: &Service) -> String {
+        let mut command = vec![powershell_literal(service.executable.as_os_str())];
+        command.extend(service.arguments().iter().map(powershell_literal));
+        format!("& {}\r\nexit $LASTEXITCODE\r\n", command.join(" "))
+    }
+
+    fn powershell_literal(value: impl AsRef<std::ffi::OsStr>) -> String {
+        format!("'{}'", value.as_ref().to_string_lossy().replace('\'', "''"))
+    }
+
+    fn task_command(runner: &std::path::Path) -> String {
+        format!(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File {}",
+            windows_quote(runner.as_os_str())
+        )
     }
 
     fn windows_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
@@ -384,15 +408,27 @@ mod platform {
         use super::*;
 
         #[test]
-        fn task_command_quotes_every_argument() {
+        fn runner_uses_literal_paths_and_preserves_arguments() {
             let service = Service {
-                executable: PathBuf::from(r"C:\Program Files\Acentric\daemon.exe"),
+                executable: PathBuf::from(r"C:\Program Files\Acentric's\daemon.exe"),
                 state_dir: PathBuf::from(r"C:\Users\Test User\state"),
                 config: None,
             };
-            let value = windows_command(&service);
-            assert!(value.starts_with(r#""C:\Program Files\Acentric\daemon.exe""#));
-            assert!(value.contains(r#""C:\Users\Test User\state""#));
+            let value = runner_script(&service);
+            assert!(value.starts_with(r#"& 'C:\Program Files\Acentric''s\daemon.exe'"#));
+            assert!(value.contains("'--state-dir'"));
+            assert!(value.contains(r#"'C:\Users\Test User\state'"#));
+            assert!(value.ends_with("exit $LASTEXITCODE\r\n"));
+        }
+
+        #[test]
+        fn task_action_starts_with_an_unquoted_hidden_powershell() {
+            let value = task_command(std::path::Path::new(
+                r"C:\Users\Test User\state\service-runner.ps1",
+            ));
+            assert!(value.starts_with("powershell.exe "));
+            assert!(value.contains("-WindowStyle Hidden"));
+            assert!(value.ends_with(r#"-File "C:\Users\Test User\state\service-runner.ps1""#));
         }
 
         #[test]

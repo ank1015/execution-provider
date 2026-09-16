@@ -192,7 +192,10 @@ directory, and optional `--config` file. Move the binary before running `connect
 it afterward leaves the service pointing at the old path. `disconnect` is idempotent and
 does not delete credentials. The daemon performs network reconnection itself. Service
 restart loops are disabled for configuration, authentication, and protocol failures that
-exit with code 2.
+exit with code 2. On Windows, Task Scheduler starts a hidden PowerShell runner so the
+background daemon does not open a console window. `connect` waits for the daemon process
+to acquire its state lock and returns an error if startup does not complete within 15
+seconds.
 
 `update` reads `https://downloads.acentric.dev/latest/manifest.json`, chooses the archive
 for the current OS and architecture, verifies the declared byte length and SHA-256 digest,
