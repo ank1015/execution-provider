@@ -368,12 +368,16 @@ Job endpoints require a user API key.
 ### Submit a job
 
 Every submission identifies one machine, one idempotency key, and one execution
-request:
+request. It may also carry an opaque `clientContext` object:
 
 ```json
 {
   "machineId": "00000000-0000-0000-0000-000000000001",
   "idempotencyKey": "start-build-2026-01-01",
+  "clientContext": {
+    "receiver": "tool-pi-bash-v1",
+    "reference": "build-2026-01-01"
+  },
   "request": {
     "operation": "execution.start",
     "params": {
@@ -399,10 +403,12 @@ The gateway responds after it has saved the job and input:
 ```
 
 `idempotencyKey` must contain 1–200 bytes without whitespace. Its scope is the user.
-Retrying the same normalized machine and request with the same key returns the existing
-job. Reusing the key with different input returns `409 idempotency_conflict`. Generate
-the key from the caller's durable action identity and keep it stable across uncertain
-HTTP outcomes.
+Retrying the same normalized machine, request, and optional `clientContext` with the
+same key returns the existing job. Adding, removing, or changing `clientContext` when
+reusing a key returns `409 idempotency_conflict`, as does changing other input. The
+gateway stores this object without interpreting its fields and does not send it to the
+machine. Generate the key from the caller's durable action identity and keep it stable
+across uncertain HTTP outcomes.
 
 New submissions require the machine to be online. The gateway can return the existing
 idempotent job even if that machine has since gone offline.
@@ -675,6 +681,10 @@ nonempty callback URL. Payload version 2 is lightweight and has this shape:
   "type": "job.succeeded",
   "jobId": "00000000-0000-0000-0000-000000000004",
   "machineId": "00000000-0000-0000-0000-000000000001",
+  "clientContext": {
+    "receiver": "tool-pi-bash-v1",
+    "reference": "build-2026-01-01"
+  },
   "completedAt": "2026-01-01T00:00:00Z"
 }
 ```
@@ -682,6 +692,9 @@ nonempty callback URL. Payload version 2 is lightweight and has this shape:
 Event types are `job.succeeded`, `job.failed`, and `job.unknown`. Version 2 does not
 embed the request, response, gateway error, credentials, or account data. After durably
 recording the event, retrieve the authoritative result from either job-detail endpoint.
+When the submission includes `clientContext`, every terminal event includes the same
+object without interpreting or modifying its contents. When omitted from the
+submission, the event omits the field. This behavior applies to both payload versions.
 
 Payload version 1 is retained for compatibility and omits `schemaVersion`; it adds
 `response` and `error` fields containing the terminal job outcome. Users migrated from

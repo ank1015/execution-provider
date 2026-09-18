@@ -151,7 +151,8 @@ records. Operation response recovery does not monitor command completion.
 
 Run `execution-gateway migrate` before starting the updated gateway; migration 0002 adds
 the per-job recovery capability and disconnected recovery deadline, while migration
-0003 adds versioned webhook payload selection.
+0003 adds versioned webhook payload selection and migration 0004 adds optional opaque
+job client context.
 
 Disabling a user/machine blocks new dispatches while preserving connections and
 already-dispatched work. Revoking a user API key does not cancel accepted jobs.

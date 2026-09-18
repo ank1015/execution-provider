@@ -240,13 +240,25 @@ impl Gateway {
         )
     }
     async fn job(&self, key: &str, machine: Uuid, idempotency: &str, request: Value) -> Uuid {
+        self.job_with_context(key, machine, idempotency, None, request)
+            .await
+    }
+    async fn job_with_context(
+        &self,
+        key: &str,
+        machine: Uuid,
+        idempotency: &str,
+        client_context: Option<Value>,
+        request: Value,
+    ) -> Uuid {
+        let mut body = json!({"machineId":machine,"idempotencyKey":idempotency,"request":request});
+        if let Some(client_context) = client_context {
+            body.as_object_mut()
+                .unwrap()
+                .insert("clientContext".into(), client_context);
+        }
         let (status, job) = self
-            .request(
-                Method::POST,
-                "/v1/jobs",
-                key,
-                Some(json!({"machineId":machine,"idempotencyKey":idempotency,"request":request})),
-            )
+            .request(Method::POST, "/v1/jobs", key, Some(body))
             .await;
         assert_eq!(status, 202, "{job}");
         uuid(&job["id"])
@@ -721,8 +733,71 @@ async fn api_registration_jobs_and_isolation() {
         )
         .await;
 
-    let running = gateway.job(&key, machine, "start", json!({"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}})).await;
+    for (index, invalid) in [json!(null), json!([]), json!("opaque"), json!(42)]
+        .into_iter()
+        .enumerate()
+    {
+        let submission = gateway
+            .request(
+                Method::POST,
+                "/v1/jobs",
+                &key,
+                Some(json!({"machineId":machine,"idempotencyKey":format!("invalid-context-{index}"),"clientContext":invalid,"request":{"operation":"runtime.info"}})),
+            )
+            .await;
+        assert_eq!(submission.0, 400, "{submission:?}");
+    }
+
+    let client_context = json!({
+        "receiver": "tool-pi-bash-v1",
+        "reference": "build/42",
+        "opaque": {"attempt": 3, "tags": ["one", "two"]}
+    });
+    let running = gateway
+        .job_with_context(
+            &key,
+            machine,
+            "start",
+            Some(client_context.clone()),
+            json!({"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}}),
+        )
+        .await;
+    assert_eq!(
+        gateway
+            .job_with_context(
+                &key,
+                machine,
+                "start",
+                Some(client_context.clone()),
+                json!({"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}}),
+            )
+            .await,
+        running
+    );
+    for conflicting_context in [
+        None,
+        Some(json!({"receiver":"tool-pi-bash-v1","reference":"different"})),
+    ] {
+        let mut body = json!({"machineId":machine,"idempotencyKey":"start","request":{"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}}});
+        if let Some(conflicting_context) = conflicting_context {
+            body.as_object_mut()
+                .unwrap()
+                .insert("clientContext".into(), conflicting_context);
+        }
+        let conflict = gateway
+            .request(Method::POST, "/v1/jobs", &key, Some(body))
+            .await;
+        assert_eq!(conflict.0, 409, "{conflict:?}");
+        assert_eq!(conflict.1["error"]["code"], "idempotency_conflict");
+    }
+    let stored_context: Value = sqlx::query_scalar("SELECT client_context FROM jobs WHERE id=$1")
+        .bind(running)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_context, client_context);
     let request = socket.request().await;
+    assert!(request.get("clientContext").is_none());
     socket.reply(&request, json!({"execution":{"handle":{"id":Uuid::new_v4(),"generation_id":generation},"state":"running"}})).await;
     assert_eq!(gateway.terminal(&key, running).await["status"], "succeeded");
     socket.idle().await;
@@ -750,6 +825,7 @@ async fn api_registration_jobs_and_isolation() {
     assert_eq!(payload["type"], "job.succeeded");
     assert_eq!(payload["jobId"], running.to_string());
     assert_eq!(payload["machineId"], machine.to_string());
+    assert_eq!(payload["clientContext"], client_context);
     assert_eq!(
         payload
             .as_object()
@@ -759,6 +835,7 @@ async fn api_registration_jobs_and_isolation() {
             .collect::<HashSet<_>>(),
         HashSet::from([
             "completedAt",
+            "clientContext",
             "eventId",
             "jobId",
             "machineId",
@@ -895,12 +972,41 @@ async fn disconnect_restart_and_credential_replacement_do_not_replay_work() {
         false,
     )
     .await;
+    let client_context = json!({"receiver":"tool-pi-bash-v1","reference":"lost-operation"});
     let job = gateway
-        .job(&key, machine, "lost", json!({"operation":"runtime.info"}))
+        .job_with_context(
+            &key,
+            machine,
+            "lost",
+            Some(client_context.clone()),
+            json!({"operation":"runtime.info"}),
+        )
         .await;
     socket.request().await;
     socket.socket.close(None).await.unwrap();
     assert_eq!(gateway.terminal(&key, job).await["status"], "unknown");
+    let deliveries = gateway
+        .request(
+            Method::GET,
+            &format!("/v1/webhook-deliveries?jobId={job}"),
+            &key,
+            None,
+        )
+        .await
+        .1;
+    let delivery = uuid(&deliveries["data"][0]["id"]);
+    let payload = gateway
+        .request(
+            Method::GET,
+            &format!("/v1/webhook-deliveries/{delivery}"),
+            &key,
+            None,
+        )
+        .await
+        .1["payload"]
+        .clone();
+    assert_eq!(payload["type"], "job.unknown");
+    assert_eq!(payload["clientContext"], client_context);
     let mut socket = MachineSocket::connect(
         &gateway,
         machine,
@@ -913,7 +1019,13 @@ async fn disconnect_restart_and_credential_replacement_do_not_replay_work() {
     socket.idle().await;
     assert_eq!(
         gateway
-            .job(&key, machine, "lost", json!({"operation":"runtime.info"}))
+            .job_with_context(
+                &key,
+                machine,
+                "lost",
+                Some(client_context.clone()),
+                json!({"operation":"runtime.info"}),
+            )
             .await,
         job
     );
@@ -1407,7 +1519,8 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash) VALUES($1,$2,$3,'fixture','fixture')").bind(job).bind(user).bind(machine).execute(&db.pool).await.unwrap();
+    let client_context = json!({"receiver":"tool-pi-bash-v1","reference":"failed-operation"});
+    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash,client_context) VALUES($1,$2,$3,'fixture','fixture',$4)").bind(job).bind(user).bind(machine).bind(&client_context).execute(&db.pool).await.unwrap();
     sqlx::query("INSERT INTO job_requests(job_id,request) VALUES($1,$2)")
         .bind(job)
         .bind(json!({"operation":"runtime.info"}))
@@ -1454,6 +1567,7 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
     assert_eq!(body["jobId"], job.to_string());
     assert_eq!(body["machineId"], machine.to_string());
     assert_eq!(body["type"], "job.failed");
+    assert_eq!(body["clientContext"], client_context);
     assert_eq!(body["error"]["code"], "fixture");
     assert!(body["response"].is_null());
     assert!(body.get("schemaVersion").is_none());
@@ -1465,6 +1579,7 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
             .collect::<HashSet<_>>(),
         HashSet::from([
             "completedAt",
+            "clientContext",
             "error",
             "eventId",
             "jobId",
