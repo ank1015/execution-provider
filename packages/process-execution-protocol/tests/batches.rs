@@ -165,6 +165,11 @@ async fn invalid_batches_and_generation_fences_have_no_side_effects() {
             start("first"),
             json!({"request_id": "stop", "operation": "runtime.shutdown"}),
         ],
+        vec![json!({
+            "request_id": "cancel",
+            "operation": "execution.terminate_run",
+            "params": {"run_id": "run-1"}
+        })],
         (0..33).map(|n| start(&n.to_string())).collect(),
     ] {
         let result = dispatch(&dispatcher, json!({"operations": operations})).await;
