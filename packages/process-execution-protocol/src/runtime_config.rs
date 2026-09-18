@@ -10,6 +10,7 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     cwd: Option<PathBuf>,
+    run_output_directory: Option<PathBuf>,
     default_shell: Option<Shell>,
     env: BTreeMap<String, String>,
     shell_snapshot: ShellSnapshotOverrides,
@@ -39,6 +40,7 @@ struct LimitOverrides {
     max_interrupt_receipts: Option<usize>,
     max_wait_ms: Option<u64>,
     finished_retention_ms: Option<u64>,
+    run_output_retention_ms: Option<u64>,
     termination_grace_ms: Option<u64>,
     max_termination_grace_ms: Option<u64>,
     output_drain_timeout_ms: Option<u64>,
@@ -58,6 +60,7 @@ pub fn load(path: Option<&Path>, cwd: Option<PathBuf>) -> crate::Result<Config> 
 impl RuntimeConfig {
     pub fn into_core(self, cwd: Option<PathBuf>) -> crate::Result<Config> {
         let mut config = Config::new(cwd.or(self.cwd).unwrap_or(std::env::current_dir()?));
+        config.run_output_directory = self.run_output_directory;
         config.default_shell = self.default_shell;
         config.env = self.env;
         self.shell_snapshot.apply(&mut config.shell_snapshot);
@@ -119,6 +122,9 @@ impl LimitOverrides {
         if let Some(v) = self.finished_retention_ms {
             limits.finished_retention = Duration::from_millis(v);
         }
+        if let Some(v) = self.run_output_retention_ms {
+            limits.run_output_retention = Duration::from_millis(v);
+        }
         if let Some(v) = self.termination_grace_ms {
             limits.termination_grace = Duration::from_millis(v);
         }
@@ -171,6 +177,30 @@ mod tests {
         assert_eq!(
             config.shell_snapshot.retry_backoff,
             Duration::from_millis(45)
+        );
+    }
+
+    #[test]
+    fn run_output_settings_are_applied() {
+        let parsed: RuntimeConfig = serde_json::from_str(
+            r#"{
+                "run_output_directory": "artifacts",
+                "limits": {
+                    "max_output_bytes_per_response": 131072,
+                    "run_output_retention_ms": 12345
+                }
+            }"#,
+        )
+        .unwrap();
+        let config = parsed.into_core(Some(std::env::temp_dir())).unwrap();
+        assert_eq!(
+            config.run_output_directory,
+            Some(PathBuf::from("artifacts"))
+        );
+        assert_eq!(config.limits.max_output_bytes_per_response, 131072);
+        assert_eq!(
+            config.limits.run_output_retention,
+            Duration::from_millis(12345)
         );
     }
 }
