@@ -1,6 +1,6 @@
 use crate::{
     Result,
-    config::{self, CONNECT_TIMEOUT, MAX_REQUESTS, WRITE_TIMEOUT},
+    config::{self, CONNECT_TIMEOUT, MAX_CONTROL_REQUESTS, MAX_REQUESTS, WRITE_TIMEOUT},
     receipts::{Admission, Receipts},
     store::{Credential, Store},
 };
@@ -224,7 +224,14 @@ impl Runner {
                                     liveness.touch();
                                     if recovery {
                                         self.accept(*request, &outgoing)?;
-                                    } else if self.requests.len() >= MAX_REQUESTS {
+                                    } else if self.requests.len()
+                                        >= MAX_REQUESTS
+                                            + if request.terminates_run() {
+                                                MAX_CONTROL_REQUESTS
+                                            } else {
+                                                0
+                                            }
+                                    {
                                         let response = Response::new(Some(request.request_id), self.dispatcher.generation_id(),
                                             Err(process_execution_core::Error { code: process_execution_core::ErrorCode::ResourceLimit, message: "host request capacity reached".into() }));
                                         outgoing.try_send(response_message(&response)?).map_err(|_| "gateway output queue is full")?;
@@ -287,11 +294,17 @@ impl Runner {
         }
         let fingerprint =
             Sha256::digest(serde_json::to_vec(&serde_json::to_value(&request)?)?).into();
-        let admission = self.receipts.lock().unwrap().accept(
-            &id,
-            fingerprint,
-            self.requests.len() >= MAX_REQUESTS,
-        );
+        let limit = MAX_REQUESTS
+            + if request.terminates_run() {
+                MAX_CONTROL_REQUESTS
+            } else {
+                0
+            };
+        let admission =
+            self.receipts
+                .lock()
+                .unwrap()
+                .accept(&id, fingerprint, self.requests.len() >= limit);
         let message = match admission {
             Admission::New => {
                 let dispatcher = self.dispatcher.clone();

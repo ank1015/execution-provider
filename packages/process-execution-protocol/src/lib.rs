@@ -14,7 +14,7 @@ pub mod runtime_config;
 pub use batch::*;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,6 +36,13 @@ pub enum Operation {
     Shutdown,
     #[serde(rename = "execution.start")]
     Start(StartParams),
+    #[serde(rename = "execution.run")]
+    Run(RunParams),
+    #[serde(rename = "execution.terminate_run")]
+    TerminateRun {
+        run_id: String,
+        grace_period_ms: Option<u64>,
+    },
     #[serde(rename = "execution.get")]
     Get { handle: core::ExecutionHandle },
     #[serde(rename = "execution.observe")]
@@ -121,6 +128,21 @@ pub struct StartParams {
     pub io: core::IoMode,
     #[serde(default)]
     pub wait_ms: u64,
+    pub max_output_bytes: Option<usize>,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RunParams {
+    pub run_id: String,
+    pub command: core::Command,
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_snapshot: Option<core::ShellSnapshotRequest>,
+    pub timeout_ms: Option<u64>,
     pub max_output_bytes: Option<usize>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
@@ -245,6 +267,29 @@ async fn dispatch_operation(
                 .await?;
             observation(result)
         }
+        Operation::Run(params) => {
+            let result = runtime
+                .run_execution(core::RunRequest {
+                    run_id: params.run_id,
+                    command: params.command,
+                    cwd: params.cwd,
+                    env: params.env,
+                    shell_snapshot: params.shell_snapshot,
+                    timeout_ms: params.timeout_ms,
+                    max_output_bytes: params.max_output_bytes,
+                    labels: params.labels,
+                })
+                .await?;
+            run_result(result)
+        }
+        Operation::TerminateRun {
+            run_id,
+            grace_period_ms,
+        } => value(
+            runtime
+                .terminate_run(run_id, grace_period_ms.map(Duration::from_millis))
+                .await?,
+        ),
         Operation::Get { handle } => value(runtime.get_execution(handle).await?),
         Operation::Observe(params) => observation(
             runtime
@@ -387,6 +432,21 @@ fn observation(result: core::Observation) -> core::Result<Value> {
     Ok(json!({"execution": result.execution, "output": output,
         "next_cursor": encode_cursor(&result.next_cursor)?, "has_more": result.has_more,
         "output_gap": result.output_gap, "return_reason": result.return_reason}))
+}
+
+fn run_result(result: core::RunResult) -> core::Result<Value> {
+    let output: Vec<_> = result
+        .output
+        .into_iter()
+        .map(|chunk| json!({"stream": chunk.stream, "data_base64": STANDARD.encode(chunk.data)}))
+        .collect();
+    Ok(json!({
+        "run_id": result.run_id,
+        "execution": result.execution,
+        "output_file": result.output_file,
+        "output": output,
+        "output_truncated": result.output_truncated,
+    }))
 }
 
 fn encode_cursor(cursor: &impl Serialize) -> core::Result<String> {

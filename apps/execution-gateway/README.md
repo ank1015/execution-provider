@@ -8,6 +8,11 @@ lightweight job-result webhooks. PostgreSQL is the durable store and queue.
 The gateway does not monitor command completion after an operation returns.
 For example, a successful `execution.start` job may contain a running execution
 handle. The caller submits `execution.observe` later when it wants more output.
+In contrast, `execution.run` completes only after the host finishes the process,
+timeout/termination handling, cleanup, and machine-local output capture. The gateway
+stores its bounded tail and output-file reference, not the complete file.
+Its eventual terminal response uses the existing gateway job-completion webhook; the
+daemon never calls customer callbacks.
 
 - [API reference](docs/api-reference.md)
 - [Architecture](docs/architecture.md)
@@ -157,7 +162,8 @@ ordinary connection loss do not revoke the machine.
 ## Limits and retention
 
 - Management JSON: 16 KiB. Job JSON: 8 MiB, including room for transport metadata.
-- Up to 256 outstanding jobs per user and 32 dispatched requests per machine.
+- Up to 256 outstanding jobs per user and 32 ordinary dispatched requests per machine,
+  plus four reserved single-request slots for `execution.terminate_run`.
 - Batches: 1–32 operations; parallel batches run up to eight operations at once.
 - Handshake/write timeout: ten seconds. Heartbeat: 15 seconds; liveness: 45 seconds.
 - Bounded job-result wait: five minutes maximum.

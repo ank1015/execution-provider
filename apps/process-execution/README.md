@@ -47,7 +47,7 @@ In another terminal:
 
 ```sh
 process-execution health --endpoint "$HOME/.process-execution/runtime.sock"
-printf '%s\n' '{"protocol_version":3,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
+printf '%s\n' '{"protocol_version":4,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
   process-execution rpc --endpoint "$HOME/.process-execution/runtime.sock"
 ```
 
@@ -61,7 +61,7 @@ In another PowerShell terminal:
 
 ```powershell
 process-execution.exe health --endpoint '\\.\pipe\process-execution'
-'{"protocol_version":3,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
+'{"protocol_version":4,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
   process-execution.exe rpc --endpoint '\\.\pipe\process-execution'
 ```
 
@@ -105,7 +105,7 @@ and exits with code 1. Local parsing, transport, or timeout errors print a diagn
 to stderr and exit with code 1; CLI usage errors exit with code 2. A managed command's
 nonzero exit code is an execution result, not an RPC failure.
 
-## Protocol version 3
+## Protocol version 4
 
 The shared [process-execution-protocol](../../packages/process-execution-protocol/README.md)
 package owns request/response types and dispatch. Single-operation requests remain
@@ -118,7 +118,7 @@ Every request has this envelope:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "request_id": "unique-correlation-id",
   "expected_generation_id": "UUID-from-health",
   "operation": "execution.get",
@@ -137,7 +137,7 @@ Successful responses have `status: "ok"` and `result`:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "request_id": "unique-correlation-id",
   "generation_id": "supervisor-UUID",
   "status": "ok",
@@ -154,6 +154,8 @@ can have a null response `request_id` when it cannot be recovered.
 | `runtime.info` | Omit | `{runtime, binary}`; runtime includes generation, default shell, and PTY/interrupt capabilities |
 | `runtime.shutdown` | Omit | `{shutdown: true}`, after managed executions finish cleanup |
 | `execution.start` | See below | Observation |
+| `execution.run` | See below | Final execution, complete output-file metadata, and bounded tail output |
+| `execution.terminate_run` | `{run_id, grace_period_ms?}` | Pending, terminating, or finished cancellation receipt |
 | `execution.get` | `{handle}` | Execution snapshot |
 | `execution.observe` | `{handle, after_cursor?, wait_ms?, return_when?, max_output_bytes?}` | Observation |
 | `execution.write_input` | `{handle, input_id, data_base64}` | `{input_id, accepted_bytes}` |
@@ -189,6 +191,35 @@ closed piped stdin, zero wait, the core output limit, and no labels. `program` p
 arguments directly; `args` defaults to an empty array. For an interactive terminal,
 use `io: {"type": "pty", "rows": 24, "cols": 80}`.
 
+Run parameters are deliberately non-interactive:
+
+```json
+{
+  "run_id": "unique-run-id",
+  "command": {"type": "program", "executable": "cargo", "args": ["test"]},
+  "cwd": "relative/to/server-cwd",
+  "env": {"EXAMPLE": "value"},
+  "shell_snapshot": {"scope_id": "stable-session-id"},
+  "timeout_ms": 300000,
+  "max_output_bytes": 65536,
+  "labels": {"owner": "example"}
+}
+```
+
+Only `run_id` and `command` are required. Omitted `timeout_ms` means no process
+timeout. The operation uses closed-stdin pipes and returns only after process cleanup
+and output draining. Its `output` is the last `max_output_bytes` raw bytes, 64 KiB by
+default and at most 1 MiB. `output_truncated` reports whether earlier or incomplete
+bytes are absent. `output_file` identifies the complete combined machine-local `.log`
+with `artifact_id`, absolute `path`, `size_bytes`, `sha256`, `complete`, and `expires_at`.
+The file contains raw stdout/stderr bytes in capture order; preview chunks retain their
+stream identity.
+
+Submit `execution.terminate_run` separately to cancel by stable `run_id`. An early
+cancellation is retained for a racing run and prevents it from launching. Repeated
+cancellation is safe; the first timeout or explicit termination cause determines the
+final result.
+
 `shell_snapshot` is optional. When supplied, the Unix host loads and caches the selected
 user shell's interactive profile for that stable scope. Its environment and shell state
 are applied before the command, while values in `env` still win. Capture failures do not
@@ -213,7 +244,7 @@ and return them unchanged. Omitting a cursor reads from the earliest retained ou
 Keep reading while `has_more` is true, even when the execution is finished.
 
 Snapshots use states `starting`, `running`, `stopping`, and `finished`. The final
-`result.reason` is `exited`, `terminated`, `start_failed`, or `lost`. Timestamps are
+`result.reason` is `exited`, `terminated`, `timed_out`, `start_failed`, or `lost`. Timestamps are
 objects containing `secs_since_epoch` and `nanos_since_epoch`; pending timestamps and
 results are null. Environment values are not included in snapshots.
 
@@ -234,7 +265,7 @@ returns `disposition: "already_applied"`.
 A disconnect, killed `rpc` process, observation timeout, or failed response delivery
 does not cancel accepted work. An error delivering a response does not prove that
 the requested action did not occur. Reconnect to the same supervisor and retry with
-the same `start_id`, `input_id`, or interrupt `operation_id`. Reuse IDs only for the
+the same `start_id`, `run_id`, `input_id`, or interrupt `operation_id`. Reuse IDs only for the
 same action and payload. Deduplication lasts as long as the core retains the record.
 
 Termination and interrupt responses acknowledge a request; observe until `finished`
@@ -246,7 +277,7 @@ flags returned by `health` and terminate when appropriate.
 process cleanup, and releases the endpoint. For example, submit this through `rpc`:
 
 ```json
-{"protocol_version":3,"request_id":"shutdown-1","operation":"runtime.shutdown"}
+{"protocol_version":4,"request_id":"shutdown-1","operation":"runtime.shutdown"}
 ```
 
 Abruptly killing the supervisor cannot run graceful shutdown. Output, retry records,
@@ -261,6 +292,7 @@ responsibility of the outer host/provider.
 ```json
 {
   "cwd": ".",
+  "run_output_directory": ".process-execution-runs",
   "env": {"EXAMPLE": "value"},
   "shell_snapshot": {
     "enabled": true,
@@ -280,6 +312,7 @@ responsibility of the outer host/provider.
     "max_interrupt_receipts": 1024,
     "max_wait_ms": 300000,
     "finished_retention_ms": 900000,
+    "run_output_retention_ms": 86400000,
     "termination_grace_ms": 2000,
     "max_termination_grace_ms": 30000,
     "output_drain_timeout_ms": 1000,

@@ -4,10 +4,13 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 /// Maximum file payload that can safely fit in the versioned protocol frame
 /// after base64 and JSON encoding.
 pub const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_RUN_PREVIEW_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub cwd: PathBuf,
+    /// Directory for complete `execution.run` output files. Relative paths use `cwd`.
+    pub run_output_directory: Option<PathBuf>,
     pub default_shell: Option<Shell>,
     pub env: BTreeMap<String, String>,
     pub shell_snapshot: ShellSnapshotConfig,
@@ -18,6 +21,7 @@ impl Config {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
+            run_output_directory: None,
             default_shell: None,
             env: BTreeMap::new(),
             shell_snapshot: ShellSnapshotConfig::default(),
@@ -87,6 +91,7 @@ pub struct Limits {
     pub max_interrupt_receipts: usize,
     pub max_wait: Duration,
     pub finished_retention: Duration,
+    pub run_output_retention: Duration,
     pub termination_grace: Duration,
     pub max_termination_grace: Duration,
     pub output_drain_timeout: Duration,
@@ -107,6 +112,7 @@ impl Default for Limits {
             max_interrupt_receipts: 1024,
             max_wait: Duration::from_secs(300),
             finished_retention: Duration::from_secs(15 * 60),
+            run_output_retention: Duration::from_secs(24 * 60 * 60),
             termination_grace: Duration::from_secs(2),
             max_termination_grace: Duration::from_secs(30),
             output_drain_timeout: Duration::from_secs(1),
@@ -140,6 +146,17 @@ impl Limits {
         }
         if self.termination_grace > self.max_termination_grace {
             return Err(Error::invalid("default termination grace exceeds maximum"));
+        }
+        if self.max_output_bytes_per_response > MAX_RUN_PREVIEW_BYTES {
+            return Err(Error::invalid(
+                "output response limit exceeds the 1 MiB run preview maximum",
+            ));
+        }
+        if self.run_output_retention.is_zero() {
+            return Err(Error::invalid("run output retention must be positive"));
+        }
+        if self.run_output_retention.as_millis() > u64::MAX as u128 {
+            return Err(Error::invalid("run output retention is too large"));
         }
         if self.max_file_write_bytes > self.max_file_read_bytes {
             return Err(Error::invalid(

@@ -7,7 +7,7 @@ An optional lightweight webhook can notify the application that the result is re
 
 This reference describes HTTP API version 1. For the system design and failure
 semantics, see [Architecture](architecture.md). The execution payload is shared with
-[`process-execution`](../../process-execution/README.md#protocol-version-1).
+[`process-execution`](../../process-execution/README.md#protocol-version-4).
 
 ## Base URL and authentication
 
@@ -445,7 +445,7 @@ A successful daemon response has this envelope:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "request_id": "00000000-0000-0000-0000-000000000004",
   "generation_id": "00000000-0000-0000-0000-000000000005",
   "status": "ok",
@@ -456,6 +456,17 @@ A successful daemon response has this envelope:
 `execution.start` completes the gateway job when the start operation returns. Its result
 may describe a process that is still running. Submit `execution.observe` in another job
 to wait for more output or completion.
+
+`execution.run` instead keeps the gateway job in progress until the non-interactive
+process, timeout/termination handling, descendant cleanup, and output capture finish.
+The final response contains a bounded output tail plus metadata for the complete
+machine-local output file. The gateway does not upload that file. A timeout, explicit
+termination, launch failure, or nonzero exit is a successful operation carrying that
+execution result; protocol and infrastructure failures fail the gateway job.
+
+Cancel a pending run by submitting a separate `execution.terminate_run` job with the
+same `run_id`. Cancellation jobs are prioritized and have reserved machine-request
+capacity. An HTTP disconnect or caller abort alone does not cancel accepted work.
 
 List jobs with optional exact filters:
 
@@ -471,6 +482,8 @@ The remote API accepts every process-execution operation except `runtime.shutdow
 | --- | --- | --- |
 | `runtime.info` | Omit | Runtime generation, shell, capabilities, and binary information |
 | `execution.start` | Start parameters below | Initial observation |
+| `execution.run` | Run parameters below | Final execution, output-file metadata, and bounded output tail |
+| `execution.terminate_run` | Stable `run_id`, optional `grace_period_ms` | Pending, terminating, or finished cancellation receipt |
 | `execution.get` | `handle` | Execution snapshot |
 | `execution.observe` | `handle`, optional cursor/wait/output controls | Observation |
 | `execution.write_input` | `handle`, `input_id`, `data_base64` | Accepted byte count |
@@ -516,6 +529,32 @@ Only `start_id` and `command` are required. A direct program command uses
 `{"type":"program","executable":"...","args":[]}`. A PTY uses
 `{"type":"pty","rows":24,"cols":80}`.
 
+Run parameters are:
+
+```json
+{
+  "run_id": "caller-stable-run-id",
+  "command": {
+    "type": "program",
+    "executable": "cargo",
+    "args": ["test"]
+  },
+  "cwd": "optional/path",
+  "env": {"EXAMPLE": "value"},
+  "shell_snapshot": {"scope_id": "stable-session-id"},
+  "timeout_ms": 300000,
+  "max_output_bytes": 65536,
+  "labels": {"owner": "example"}
+}
+```
+
+Only `run_id` and `command` are required. It always uses closed-stdin pipes. Omitting
+`timeout_ms` means no execution timeout. The response returns the last 64 KiB by
+default; a request may lower that value, and host configuration may raise it to at most
+1 MiB. `output_truncated` indicates that the machine-local file contains earlier bytes.
+The `output_file` object includes `artifact_id`, absolute machine `path`, `size_bytes`,
+`sha256`, `complete`, and `expires_at`. The default host retention is 24 hours.
+
 `shell_snapshot` is optional. It asks a compatible Unix host to load and cache the
 selected user's interactive shell profile for the stable scope before launching the
 command. Per-start `env` values override captured values. The gateway transports the
@@ -529,6 +568,7 @@ true. `return_when` can be `activity` or `finished_or_timeout`.
 Use caller-stable retry identities for side-effecting operations:
 
 - `start_id` for `execution.start`.
+- `run_id` for `execution.run` and `execution.terminate_run`.
 - `input_id` for `execution.write_input`.
 - `operation_id` for `execution.interrupt`.
 - `mutation_id` for `filesystem.write_file` and `filesystem.remove_file`.
@@ -694,7 +734,8 @@ Readiness does not imply that a particular machine is online.
 
 - Names contain 1–200 characters after trimming.
 - A user can have up to 256 jobs in nonterminal states.
-- A machine connection dispatches up to 32 outstanding requests.
+- A machine connection dispatches up to 32 ordinary outstanding requests and reserves
+  four additional slots for single `execution.terminate_run` requests.
 - Registration tokens expire after 15 minutes and are single-use.
 - A queued job that cannot dispatch within 30 seconds fails with `dispatch_timeout`.
 - Recoverable dispatched jobs have a 24-hour disconnected recovery window.

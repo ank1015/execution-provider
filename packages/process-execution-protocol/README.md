@@ -1,12 +1,12 @@
 # process-execution-protocol
 
-Shared version 3 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
+Shared version 4 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
 batching. Both `process-execution` and `process-execution-host-daemon` use this crate.
 It embeds no network transport and owns no processes independently of the supplied core.
 
-The [execution API reference](../../apps/process-execution/README.md#protocol-version-3)
-documents the single-operation requests and responses. Version 3 adds the optional
-`execution.start.params.shell_snapshot` request and advertises its runtime capability.
+The [execution API reference](../../apps/process-execution/README.md#protocol-version-4)
+documents the single-operation requests and responses. Version 4 adds `execution.run`,
+`execution.terminate_run`, timed-out results, and complete machine-local output artifacts.
 `runtime_config::RuntimeConfig` provides the common JSON configuration
 for an embedded core.
 
@@ -28,7 +28,7 @@ Send `operations` instead of `operation`/`params`:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "request_id": "batch-1",
   "mode": "parallel",
   "accepted_error_codes": ["not_found"],
@@ -42,7 +42,8 @@ Send `operations` instead of `operation`/`params`:
 An optional outer `expected_generation_id` fences the entire batch. A malformed batch,
 duplicate request IDs, or a generation mismatch rejects the envelope before dispatch.
 There must be 1–32 operations. Request IDs contain 1–256 bytes and must be unique within
-the batch. Nested batches, mixed single/batch envelopes, and batched shutdown are rejected.
+the batch. Nested batches, mixed single/batch envelopes, batched shutdown, and batched
+run termination are rejected.
 
 - `sequential` (default): dispatch in input order, waiting for each operation response.
   On the first operation error, remaining operations are marked `skipped`.
@@ -80,10 +81,13 @@ when one command must finish before the next begins. References to earlier batch
 are not supported; newly returned handles require a subsequent request.
 
 No rollback occurs. Each operation retains its existing retry semantics: `start_id`,
-`input_id`, interrupt `operation_id`, and filesystem `mutation_id` still matter. `request_id` is correlation in the local RPC transport. Negotiated gateway
+`run_id`, `input_id`, interrupt `operation_id`, and filesystem `mutation_id` still
+matter. `request_id` is correlation in the local RPC transport. Negotiated gateway
 recovery also uses the outer ID for in-memory deduplication until acknowledgement. An accepted batch continues if its client disconnects while its
 host remains running. Lost responses can be recovered through observation/listing and
-appropriate per-operation retries. Daemon shutdown can interrupt unfinished batch work.
+appropriate per-operation retries. `execution.run` can keep a batch open until its
+process finishes. `execution.terminate_run` is a separate envelope so reserved control
+capacity can deliver it. Daemon shutdown can interrupt unfinished batch work.
 
 A future sandbox adapter can hold one activity lease around the whole batch. Releasing
 that lease does not imply that the sandbox is idle: active commands and other requests
@@ -91,7 +95,7 @@ must still be considered before pausing it.
 
 ## Gateway transport contract
 
-`gateway::{HostMessage, GatewayMessage}` defines the version 3 handshake:
+`gateway::{HostMessage, GatewayMessage}` defines the version 4 handshake:
 
 1. The daemon connects to `wss://GATEWAY/BASE/v1/machines/MACHINE_ID/connect`, authenticating
    with an `Authorization: Bearer ...` header. It sends a `hello` containing protocol

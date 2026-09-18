@@ -38,6 +38,9 @@ fn command(args: &[&str]) -> Command {
 fn request(id: &str, args: &[&str]) -> StartRequest {
     StartRequest::new(id, command(args))
 }
+fn run_request(id: &str, args: &[&str]) -> RunRequest {
+    RunRequest::new(id, command(args))
+}
 fn bytes(observation: &Observation) -> Vec<u8> {
     observation
         .output
@@ -84,6 +87,153 @@ async fn wait_for(core: &ProcessExecutionCore, handle: ExecutionHandle, needle: 
     })
     .await
     .expect("expected output was not received");
+}
+
+#[tokio::test]
+async fn run_spools_complete_output_and_returns_a_bounded_tail() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config();
+    config.run_output_directory = Some(directory.path().join("outputs"));
+    config.limits.max_retained_output_bytes = 37;
+    let core = ProcessExecutionCore::new(config).unwrap();
+    let mut request = run_request("complete-output", &["bytes", "4097"]);
+    request.max_output_bytes = Some(64);
+    let result = core.run_execution(request.clone()).await.unwrap();
+    assert!(matches!(
+        result.execution.result,
+        Some(ExecutionResult::Exited {
+            exit_code: Some(0),
+            ..
+        })
+    ));
+    assert!(result.output_file.complete);
+    assert_eq!(result.output_file.size_bytes, 4097);
+    assert!(result.output_truncated);
+    assert_eq!(
+        result
+            .output
+            .iter()
+            .flat_map(|chunk| chunk.data.clone())
+            .collect::<Vec<_>>(),
+        (4033..4097).map(|i| (i % 256) as u8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        std::fs::read(&result.output_file.path).unwrap(),
+        (0..4097).map(|i| (i % 256) as u8).collect::<Vec<_>>()
+    );
+    let replay = core.run_execution(request).await.unwrap();
+    assert_eq!(
+        replay.output_file.artifact_id,
+        result.output_file.artifact_id
+    );
+    assert_eq!(
+        core.run_execution(run_request("complete-output", &["exit", "0"]))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_timeout_and_explicit_termination_have_distinct_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config();
+    config.run_output_directory = Some(directory.path().join("outputs"));
+    let core = ProcessExecutionCore::new(config).unwrap();
+
+    let mut timed = run_request("timed", &["sleep"]);
+    timed.timeout_ms = Some(40);
+    let timed = core.run_execution(timed).await.unwrap();
+    assert!(matches!(
+        timed.execution.result,
+        Some(ExecutionResult::TimedOut { .. })
+    ));
+
+    let running_core = core.clone();
+    let running = tokio::spawn(async move {
+        running_core
+            .run_execution(run_request("terminated", &["sleep"]))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = core.list_executions(ListRequest::default()).await.unwrap();
+            if page
+                .executions
+                .iter()
+                .any(|execution| execution.state == ExecutionState::Running)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let receipt = core.terminate_run("terminated", None).await.unwrap();
+    assert!(matches!(receipt.state, TerminateRunState::Terminating));
+    let terminated = running.await.unwrap();
+    assert!(matches!(
+        terminated.execution.result,
+        Some(ExecutionResult::Terminated { .. })
+    ));
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminate_run_records_an_early_cancellation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config();
+    config.run_output_directory = Some(directory.path().join("outputs"));
+    let core = ProcessExecutionCore::new(config).unwrap();
+    let receipt = core
+        .terminate_run("cancel-before-start", None)
+        .await
+        .unwrap();
+    assert!(matches!(receipt.state, TerminateRunState::Pending));
+    let result = core
+        .run_execution(run_request("cancel-before-start", &["sleep"]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.execution.result,
+        Some(ExecutionResult::Terminated {
+            exit_code: None,
+            signal: None
+        })
+    ));
+    assert!(result.execution.started_at.is_none());
+    assert_eq!(result.output_file.size_bytes, 0);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_output_file_and_identity_expire_together() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config();
+    config.run_output_directory = Some(directory.path().join("outputs"));
+    config.limits.run_output_retention = Duration::from_millis(20);
+    let core = ProcessExecutionCore::new(config).unwrap();
+    let first = core
+        .run_execution(run_request("expiring-run", &["bytes", "8"]))
+        .await
+        .unwrap();
+    assert!(first.output_file.path.is_file());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    core.list_executions(ListRequest::default()).await.unwrap();
+    assert!(!first.output_file.path.exists());
+    let replacement = core
+        .run_execution(run_request("expiring-run", &["exit", "0"]))
+        .await
+        .unwrap();
+    assert_ne!(
+        first.output_file.artifact_id,
+        replacement.output_file.artifact_id
+    );
+    core.shutdown().await.unwrap();
 }
 
 #[tokio::test]

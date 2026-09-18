@@ -286,6 +286,20 @@ async fn authenticated_execution_batches_and_local_administration_boundary() {
         })
         .collect();
     assert!(String::from_utf8_lossy(&output).contains("env=configured"));
+    let run = rpc(
+        &mut socket,
+        json!({"operation":"execution.run","params":{
+            "run_id":"daemon-run","command":{"type":"program","executable":fixture(),"args":["bytes","257"]},
+            "max_output_bytes":31
+        }}),
+    )
+    .await;
+    assert_eq!(run["result"]["execution"]["result"]["reason"], "exited");
+    assert_eq!(run["result"]["output_file"]["size_bytes"], 257);
+    assert!(
+        PathBuf::from(run["result"]["output_file"]["path"].as_str().unwrap())
+            .starts_with(host.directory.path().join("run-output"))
+    );
     let written = rpc(
         &mut socket,
         json!({"operation":"filesystem.write_file","params":{

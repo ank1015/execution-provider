@@ -115,6 +115,9 @@ pub fn normalize(value: Value) -> Result<Value> {
                     ));
                 }
                 validate_operation(&item.operation)?;
+                if matches!(item.operation, Operation::TerminateRun { .. }) {
+                    return Err(Error::invalid("execution.terminate_run cannot be batched"));
+                }
             }
         }
     }
@@ -462,12 +465,13 @@ pub async fn dispatch_next(
     generation: Uuid,
     version: i32,
     recovery: bool,
+    control_only: bool,
 ) -> Result<Option<(Uuid, Request)>> {
     let mut tx = state.pool.begin().await?;
     let usable: bool = sqlx::query_scalar("SELECT m.enabled AND u.enabled AND m.deleted_at IS NULL AND m.credential_version=$2 FROM machines m JOIN users u ON u.id=m.user_id WHERE m.id=$1 FOR SHARE OF m,u")
         .bind(machine).bind(version).fetch_one(&mut *tx).await?;
-    let job: Option<(Uuid, Value)> = sqlx::query_as("SELECT j.id,r.request FROM jobs j JOIN job_requests r ON r.job_id=j.id WHERE j.machine_id=$1 AND j.status='queued' ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED")
-        .bind(machine).fetch_optional(&mut *tx).await?;
+    let job: Option<(Uuid, Value)> = sqlx::query_as("SELECT j.id,r.request FROM jobs j JOIN job_requests r ON r.job_id=j.id WHERE j.machine_id=$1 AND j.status='queued' AND (NOT $2 OR r.request->>'operation'='execution.terminate_run') ORDER BY (r.request->>'operation'='execution.terminate_run') DESC,j.created_at,j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED")
+        .bind(machine).bind(control_only).fetch_optional(&mut *tx).await?;
     let Some((id, value)) = job else {
         return Ok(None);
     };

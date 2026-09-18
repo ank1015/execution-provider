@@ -95,7 +95,9 @@ registration/configuration operation can own the directory at a time.
 
 Status contains no credential. `running: false` means the saved connection snapshot is
 historical. An installation ID survives restarts; a runtime generation does not. Execution
-records, request receipts, and output remain in memory, not in the state directory.
+records, request receipts, and bounded journals remain in memory. Complete
+`execution.run` output files use the private state directory's `run-output` subdirectory
+unless runtime configuration selects another location.
 Existing profiles keep working; the stored `host_id` identifies the gateway machine.
 
 Logs go to stderr. `run` leaves stdout empty. Configuration/authentication/protocol
@@ -110,6 +112,7 @@ failures exit with code 2; a local Ctrl-C or Unix SIGTERM shuts down cleanly wit
   "gateway_url": "https://gateway.example.com",
   "execution": {
     "cwd": ".",
+    "run_output_directory": "/private/path/to/run-output",
     "env": {"EXAMPLE": "value"},
     "shell_snapshot": {"enabled": true, "max_cached_scopes": 64},
     "limits": {
@@ -145,10 +148,17 @@ handle suspension and clock changes. Missed heartbeats, dropped TCP connections,
 network failures reconnect with jittered exponential backoff from approximately one
 second to a 30-second cap. A connection lasting at least 30 seconds resets the backoff.
 
-There are at most 32 outstanding request envelopes, 32 operations per batch, and eight
+There are at most 32 ordinary outstanding request envelopes, plus four reserved slots
+for single `execution.terminate_run` requests, 32 operations per batch, and eight
 parallel operations per batch. Output queues and messages are bounded. Excess requests
 receive a resource-limit error; a stalled connection is dropped. Slow or disconnected
 gateways cannot block the core's output collection indefinitely.
+
+`execution.run` uses closed-stdin pipes, applies its optional process timeout on the
+host, streams complete combined output to a private file, and returns a bounded tail
+only after cleanup and output drain finish. `execution.terminate_run` cancels it by
+stable `run_id`; early cancellation is retained across admission races. Network loss
+does not itself terminate a run.
 
 Accepted commands and batches belong to the daemon. When both peers negotiate
 `request_recovery`, the daemon records acceptance before dispatch, retains each complete

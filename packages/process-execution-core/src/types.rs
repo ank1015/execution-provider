@@ -93,12 +93,81 @@ pub enum ExecutionResult {
         exit_code: Option<u32>,
         signal: Option<String>,
     },
+    TimedOut {
+        exit_code: Option<u32>,
+        signal: Option<String>,
+    },
     StartFailed {
         message: String,
     },
     Lost {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRequest {
+    pub run_id: String,
+    pub command: Command,
+    pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    /// Requests one cached interactive-profile snapshot for this logical scope.
+    pub shell_snapshot: Option<ShellSnapshotRequest>,
+    /// Process lifetime after a successful launch. Omission means no timeout.
+    pub timeout_ms: Option<u64>,
+    /// Maximum raw bytes returned in the tail preview.
+    pub max_output_bytes: Option<usize>,
+    pub labels: BTreeMap<String, String>,
+}
+
+impl RunRequest {
+    pub fn new(run_id: impl Into<String>, command: Command) -> Self {
+        Self {
+            run_id: run_id.into(),
+            command,
+            cwd: None,
+            env: BTreeMap::new(),
+            shell_snapshot: None,
+            timeout_ms: None,
+            max_output_bytes: None,
+            labels: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunOutputFile {
+    pub artifact_id: Uuid,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub complete: bool,
+    pub expires_at: SystemTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResult {
+    pub run_id: String,
+    pub execution: Execution,
+    pub output_file: RunOutputFile,
+    /// A bounded tail of the output file, preserving captured stream identities.
+    pub output: Vec<OutputChunk>,
+    pub output_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminateRunState {
+    Pending,
+    Terminating,
+    Finished,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminateRunReceipt {
+    pub run_id: String,
+    pub state: TerminateRunState,
+    pub execution: Option<Execution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +357,14 @@ pub struct RuntimeInfo {
     pub terminal_interrupt: bool,
     pub filesystem: FileSystemCapabilities,
     pub shell_snapshot: ShellSnapshotCapabilities,
+    pub execution_run: RunCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCapabilities {
+    pub max_preview_bytes: usize,
+    pub output_retention_ms: u64,
+    pub terminate_by_run_id: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

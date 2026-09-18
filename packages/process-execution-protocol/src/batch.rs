@@ -110,6 +110,13 @@ impl Request {
     pub fn requests_shutdown(&self) -> bool {
         matches!(self.payload, Payload::Single(Operation::Shutdown))
     }
+
+    pub fn terminates_run(&self) -> bool {
+        matches!(
+            self.payload,
+            Payload::Single(Operation::TerminateRun { .. })
+        )
+    }
 }
 
 impl Response {
@@ -193,6 +200,9 @@ impl Dispatcher {
                     }
                     if matches!(operation.operation, Operation::Shutdown) {
                         return Err(invalid("runtime.shutdown cannot be batched"));
+                    }
+                    if matches!(operation.operation, Operation::TerminateRun { .. }) {
+                        return Err(invalid("execution.terminate_run cannot be batched"));
                     }
                 }
                 Ok(())

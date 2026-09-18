@@ -54,6 +54,10 @@ impl Store {
         Ok(credential)
     }
 
+    pub fn run_output_directory(&self) -> PathBuf {
+        self.directory.join("run-output")
+    }
+
     pub fn configure(&self, credential: &Credential) -> Result<()> {
         write_json(&self.directory.join("credential.json"), credential)
     }

@@ -208,7 +208,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if gateway != registered {
                 return Err("gateway URL differs from the registered gateway; configure a credential for that gateway first".into());
             }
-            let core = ProcessExecutionCore::new(config.execution.into_core(None)?)?;
+            let mut execution = config.execution.into_core(None)?;
+            if execution.run_output_directory.is_none() {
+                execution.run_output_directory = Some(store.run_output_directory());
+            }
+            let core = ProcessExecutionCore::new(execution)?;
             let generation = core.runtime_info().generation_id;
             let mut runner = connection::Runner::new(core, version());
             let outcome = tokio::select! {
