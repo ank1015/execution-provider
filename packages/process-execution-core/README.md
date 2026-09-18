@@ -1,7 +1,8 @@
 # process-execution-core
 
 A Rust library that owns local command executions, pipes and terminals, input queues,
-output history, and completion results. Linux, macOS, and Windows share the same API.
+output history, complete run-output files, and completion results. Linux, macOS, and
+Windows share the same API.
 
 The embedding application handles remote access, owner routing, execution expiration,
 and sandbox pause/resume. This crate has no server, wire protocol, or execution-expiry timer.
@@ -46,6 +47,8 @@ generation are rejected before any operation occurs.
 | `new` | `Config` | Core runtime |
 | `runtime_info` | — | Generation, resolved default shell, capabilities |
 | `start_execution` | `StartRequest` | Execution snapshot and initial output |
+| `run_execution` | `RunRequest` | Final execution, complete output-file metadata, and bounded tail output |
+| `terminate_run` | Run ID, optional grace duration | Idempotent pending/terminating/finished receipt |
 | `get_execution` | Handle | Execution snapshot |
 | `observe_execution` | `ObserveRequest` | Snapshot, output, cursor, gap/more indicators |
 | `write_input` | Handle, input ID, bytes | Accepted-byte receipt |
@@ -103,8 +106,8 @@ Relative execution working directories resolve against the configured working di
 
 Executions move through `Starting`, `Running`, `Stopping`, and `Finished`. `Stopping`
 also covers cleanup and output draining after the direct child exits. The final
-result distinguishes normal exit (including nonzero codes), requested termination,
-launch failure, and lost outcome. A command failing to spawn remains a queryable
+result distinguishes normal exit (including nonzero codes), timeout, requested
+termination, launch failure, and lost outcome. A command failing to spawn remains a queryable
 `StartFailed` result; invalid requests are function errors.
 
 Accepted work belongs to the runtime. Dropping a start/observe future, timing out an
@@ -117,6 +120,19 @@ supports two wait modes:
 
 - `Activity`: returns when new output or an execution change is available.
 - `FinishedOrTimeout`: collects until completion, the response fills, or the wait ends.
+
+`run_execution` is the non-interactive completion primitive. It always uses closed-stdin
+pipes, optionally enforces `timeout_ms` after a successful launch, and returns only after
+process cleanup and output draining finish. Every captured byte is streamed to a private
+machine-local file while the result includes only a bounded tail preview (64 KiB by
+default and at most 1 MiB). The file metadata includes an artifact ID, absolute path,
+size, SHA-256, completeness, and expiry. Stdout and stderr identities are retained in
+the preview; the file itself contains their raw bytes in capture order.
+
+`terminate_run` addresses this work by caller-stable `run_id`. It is safe to repeat. A
+termination racing ahead of run admission is retained, so the corresponding run is
+completed as terminated without launching. The first timeout or explicit termination
+cause wins.
 
 Output is raw bytes in a bounded **in-memory journal**. Pipes retain separate stdout
 and stderr streams; PTYs produce one terminal stream. Pipe stream ordering reflects
@@ -151,12 +167,14 @@ input instead. Windows terminal line input commonly needs `\r` for Enter.
 
 Reusing a start ID with identical arguments returns the same execution, without
 repeating the initial collection wait. Different arguments produce an idempotency
-conflict. Input IDs similarly reject different bytes. Interrupt operation IDs retain
+conflict. Run IDs retain the same final execution and artifact for
+`run_output_retention`; changed arguments conflict. Input IDs similarly reject different bytes. Interrupt operation IDs retain
 their first receipt. Repeated termination preserves the first termination deadline.
 Termination acknowledgement does not mean cleanup is complete; observe the execution.
 
-Execution and retry records share `finished_retention`. After that interval the record
-is removed and its IDs no longer deduplicate requests. The caller must use new unique
+Start execution and retry records share `finished_retention`. Run records and their
+files use `run_output_retention`; the output file is removed when that record expires.
+After retention ends, IDs no longer deduplicate requests. The caller must use new unique
 IDs for new work. Input/interrupt receipt counts are bounded; reaching a limit rejects
 new operations rather than forgetting existing receipts.
 
@@ -167,7 +185,8 @@ making outer sandbox-idle decisions, and coordinate those decisions with new sta
 
 Default limits are 64 active executions, 1,024 retained records, 1 MiB retained output
 per execution, 64 KiB output per response, a 1 MiB input queue per execution, 15 minutes
-of finished retention, a 2-second termination grace period, and a 1-second output drain.
+of finished-start retention, 24 hours of run-output retention, a 2-second termination
+grace period, and a 1-second output drain.
 `Limits` also bounds observation waits and retry receipt counts. Capacity exhaustion
 rejects new starts without evicting active work.
 
@@ -205,8 +224,9 @@ returns `UnsupportedOperation`, and termination directly terminates the job.
 `shutdown()` rejects new starts, terminates accepted executions, and waits for their
 results/output to finalize. Dropping the last core clone requests cleanup while its
 Tokio runtime remains alive; explicit shutdown is the supported way to await it.
-Commands, output, and retry records are not restored after a runtime restart. A new
-runtime has a new generation ID.
+Commands, execution state, and retry records are not restored after a runtime restart.
+Run files already written can remain on disk, but their in-memory artifact records are
+lost. A new runtime has a new generation ID.
 
 ## Development
 
