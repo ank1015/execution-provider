@@ -1,7 +1,10 @@
 use crate::{backend, journal::Journal, *};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    fs::{File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -28,11 +31,163 @@ pub(crate) struct Data {
     pub root_exited: bool,
     pub finished_at: Option<Instant>,
     pub stop_deadline: Option<Instant>,
+    pub stop_reason: Option<StopReason>,
     pub control: Option<Arc<dyn backend::Control>>,
     pub stdin: StdinState,
     pub input_tx: Option<mpsc::UnboundedSender<Input>>,
     pub input_receipts: HashMap<String, ([u8; 32], InputReceipt)>,
     pub interrupt_receipts: HashMap<String, Result<Execution>>,
+    output_spool: Option<OutputSpool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    ExplicitTermination,
+    Timeout,
+    RuntimeShutdown,
+}
+
+pub(crate) struct OutputSpool {
+    artifact_id: uuid::Uuid,
+    path: PathBuf,
+    file: Option<File>,
+    hasher: Sha256,
+    sha256: Option<String>,
+    size_bytes: u64,
+    captured_bytes: u64,
+    tail: VecDeque<OutputChunk>,
+    tail_bytes: usize,
+    tail_capacity: usize,
+    error: Option<String>,
+}
+
+impl OutputSpool {
+    pub fn create(directory: &Path, tail_capacity: usize) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700).create(directory)?;
+        }
+        #[cfg(windows)]
+        std::fs::create_dir_all(directory)?;
+        let artifact_id = uuid::Uuid::new_v4();
+        let path = directory.join(format!("{artifact_id}.log"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        Ok(Self {
+            artifact_id,
+            path,
+            file: Some(file),
+            hasher: Sha256::new(),
+            sha256: None,
+            size_bytes: 0,
+            captured_bytes: 0,
+            tail: VecDeque::new(),
+            tail_bytes: 0,
+            tail_capacity,
+            error: None,
+        })
+    }
+
+    fn append(&mut self, stream: OutputStream, data: &[u8]) {
+        self.captured_bytes = self.captured_bytes.saturating_add(data.len() as u64);
+        self.append_tail(stream, data);
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            match file.write(remaining) {
+                Ok(0) => {
+                    self.fail("output file write returned zero bytes".into());
+                    break;
+                }
+                Ok(count) => {
+                    self.hasher.update(&remaining[..count]);
+                    self.size_bytes += count as u64;
+                    remaining = &remaining[count..];
+                }
+                Err(error) => {
+                    self.fail(error.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    fn append_tail(&mut self, stream: OutputStream, data: &[u8]) {
+        if self.tail_capacity == 0 {
+            return;
+        }
+        self.tail.push_back(OutputChunk {
+            stream,
+            data: data.to_vec(),
+        });
+        self.tail_bytes += data.len();
+        while self.tail_bytes > self.tail_capacity {
+            let discard = self.tail_bytes - self.tail_capacity;
+            let front = self.tail.front_mut().expect("tail is not empty");
+            let count = discard.min(front.data.len());
+            front.data.drain(..count);
+            self.tail_bytes -= count;
+            if front.data.is_empty() {
+                self.tail.pop_front();
+            }
+        }
+    }
+
+    fn fail(&mut self, message: String) {
+        self.error.get_or_insert(message);
+        self.file = None;
+    }
+
+    fn finalize(&mut self) {
+        if let Some(mut file) = self.file.take()
+            && let Err(error) = file.flush().and_then(|()| file.sync_data())
+        {
+            self.error.get_or_insert(error.to_string());
+        }
+        self.sha256 = Some(hex_digest(self.hasher.clone().finalize().as_slice()));
+    }
+
+    fn preview(&self, limit: usize) -> Vec<OutputChunk> {
+        let mut skip = self.tail_bytes.saturating_sub(limit);
+        let mut output = Vec::new();
+        for chunk in &self.tail {
+            if skip >= chunk.data.len() {
+                skip -= chunk.data.len();
+                continue;
+            }
+            output.push(OutputChunk {
+                stream: chunk.stream,
+                data: chunk.data[skip..].to_vec(),
+            });
+            skip = 0;
+        }
+        output
+    }
+
+    fn output_file(&self, complete: bool, expires_at: SystemTime) -> RunOutputFile {
+        RunOutputFile {
+            artifact_id: self.artifact_id,
+            path: self.path.clone(),
+            size_bytes: self.size_bytes,
+            sha256: self.sha256.clone().unwrap_or_default(),
+            complete: complete && self.error.is_none(),
+            expires_at,
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) enum Input {
@@ -44,7 +199,11 @@ pub(crate) enum Input {
 }
 
 impl Session {
-    pub fn new(execution: Execution, limits: Limits) -> Arc<Self> {
+    pub fn new(
+        execution: Execution,
+        limits: Limits,
+        output_spool: Option<OutputSpool>,
+    ) -> Arc<Self> {
         let stdin = match execution.io {
             IoMode::Pipes { stdin: false } => StdinState::Closed,
             _ => StdinState::Open,
@@ -57,11 +216,13 @@ impl Session {
                 root_exited: false,
                 finished_at: None,
                 stop_deadline: None,
+                stop_reason: None,
                 control: None,
                 stdin,
                 input_tx: None,
                 input_receipts: HashMap::new(),
                 interrupt_receipts: HashMap::new(),
+                output_spool,
             }),
             changed: Notify::new(),
             input_capacity: Arc::new(Semaphore::new(limits.max_queued_input_bytes)),
@@ -98,13 +259,14 @@ impl Session {
         }
     }
 
-    pub fn terminate(&self, grace: Duration) -> Execution {
+    pub fn terminate(&self, grace: Duration, reason: StopReason) -> Execution {
         let mut data = self.data.lock().unwrap();
         if data.execution.state != ExecutionState::Finished
             && !data.root_exited
             && data.stop_deadline.is_none()
         {
             data.stop_deadline = Some(Instant::now() + grace);
+            data.stop_reason = Some(reason);
             data.execution.state = ExecutionState::Stopping;
             data.journal.revision += 1;
         }
@@ -113,6 +275,45 @@ impl Session {
         self.stop.notify_one();
         self.changed.notify_waiters();
         snapshot
+    }
+
+    pub fn run_result(
+        &self,
+        run_id: String,
+        output_limit: usize,
+        expires_at: SystemTime,
+    ) -> Result<RunResult> {
+        let data = self.data.lock().unwrap();
+        if data.execution.state != ExecutionState::Finished {
+            return Err(Error::new(ErrorCode::InvalidState, "run is not finished"));
+        }
+        let spool = data
+            .output_spool
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidState, "run has no output file"))?;
+        let output = spool.preview(output_limit);
+        let preview_bytes = output.iter().map(|chunk| chunk.data.len() as u64).sum();
+        let complete = !data.execution.output_incomplete;
+        Ok(RunResult {
+            run_id,
+            execution: data.execution.clone(),
+            output_file: spool.output_file(complete, expires_at),
+            output,
+            output_truncated: !complete || spool.captured_bytes > preview_bytes,
+        })
+    }
+
+    pub fn remove_output_file(&self) {
+        let path = self
+            .data
+            .lock()
+            .unwrap()
+            .output_spool
+            .as_ref()
+            .map(|spool| spool.path.clone());
+        if let Some(path) = path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn write(&self, input_id: String, bytes: Vec<u8>) -> Result<InputReceipt> {
@@ -206,8 +407,14 @@ impl Session {
         Ok(data.stdin)
     }
 
-    fn finish(&self, result: ExecutionResult) {
+    pub(crate) fn finish(&self, result: ExecutionResult) {
         let mut data = self.data.lock().unwrap();
+        if let Some(spool) = data.output_spool.as_mut() {
+            spool.finalize();
+            if spool.error.is_some() {
+                data.execution.output_incomplete = true;
+            }
+        }
         data.execution.state = ExecutionState::Finished;
         data.execution.result = Some(result);
         data.execution.finished_at = Some(SystemTime::now());
@@ -304,7 +511,7 @@ pub(crate) async fn run(
             status = &mut wait => break status,
             () = shutdown.cancelled(), if !shutdown_seen => {
                 shutdown_seen = true;
-                session.terminate(session.limits.termination_grace);
+                session.terminate(session.limits.termination_grace, StopReason::RuntimeShutdown);
             }
             () = session.stop.notified() => (),
             () = async { tokio::time::sleep_until(stop_deadline.unwrap()).await }, if stop_deadline.is_some() && !killed => (),
@@ -354,6 +561,7 @@ pub(crate) async fn run(
     if let Err(error) = release.await {
         failure = Some(Error::new(ErrorCode::Io, error.to_string()));
     }
+    let stop_reason = session.data.lock().unwrap().stop_reason;
     let result = match (exit, failure) {
         (_, Some(error)) => ExecutionResult::Lost {
             message: error.message,
@@ -361,6 +569,12 @@ pub(crate) async fn run(
         (Err(error), _) => ExecutionResult::Lost {
             message: error.to_string(),
         },
+        (Ok(status), _) if stopping && stop_reason == Some(StopReason::Timeout) => {
+            ExecutionResult::TimedOut {
+                exit_code: status.code,
+                signal: status.signal,
+            }
+        }
         (Ok(status), _) if stopping => ExecutionResult::Terminated {
             exit_code: status.code,
             signal: status.signal,
@@ -384,12 +598,16 @@ async fn read_output(
         if count == 0 {
             return Ok(());
         }
-        session
-            .data
-            .lock()
-            .unwrap()
-            .journal
-            .append(stream, buffer[..count].to_vec());
+        {
+            let mut data = session.data.lock().unwrap();
+            data.journal.append(stream, buffer[..count].to_vec());
+            if let Some(spool) = data.output_spool.as_mut() {
+                spool.append(stream, &buffer[..count]);
+                if spool.error.is_some() {
+                    data.execution.output_incomplete = true;
+                }
+            }
+        }
         session.changed.notify_waiters();
         tokio::task::yield_now().await;
     }

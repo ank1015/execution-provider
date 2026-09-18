@@ -1,6 +1,6 @@
 use crate::{
     backend,
-    session::{self, Session},
+    session::{self, OutputSpool, Session, StopReason},
     shell, shell_snapshot, *,
 };
 use std::{
@@ -30,13 +30,20 @@ struct Registry {
     entries: BTreeMap<u64, Entry>,
     handles: HashMap<Uuid, u64>,
     starts: HashMap<String, u64>,
+    runs: HashMap<String, u64>,
+    pending_run_terminations: HashMap<String, PendingRunTermination>,
     next_sequence: u64,
     shutting_down: bool,
 }
 
 struct Entry {
-    request: StartRequest,
+    start_request: Option<StartRequest>,
+    run_request: Option<RunRequest>,
     session: Arc<Session>,
+}
+
+struct PendingRunTermination {
+    created_at: Instant,
 }
 
 impl Drop for Inner {
@@ -56,6 +63,15 @@ impl ProcessExecutionCore {
         if !config.cwd.is_dir() {
             return Err(Error::invalid("configured cwd is not a directory"));
         }
+        let output_directory = config
+            .run_output_directory
+            .take()
+            .unwrap_or_else(|| config.cwd.join(".process-execution-runs"));
+        config.run_output_directory = Some(if output_directory.is_absolute() {
+            output_directory
+        } else {
+            config.cwd.join(output_directory)
+        });
         let default_shell = match &config.default_shell {
             Some(shell) => shell::resolve(shell)?,
             None => shell::discover()?,
@@ -84,6 +100,11 @@ impl ProcessExecutionCore {
                 supported: cfg!(unix),
                 max_scope_id_bytes: shell_snapshot::MAX_SCOPE_ID_BYTES,
             },
+            execution_run: RunCapabilities {
+                max_preview_bytes: config.limits.max_output_bytes_per_response,
+                output_retention_ms: config.limits.run_output_retention.as_millis() as u64,
+                terminate_by_run_id: true,
+            },
         };
         let shell_snapshots =
             shell_snapshot::ShellSnapshotCache::new(config.shell_snapshot.clone());
@@ -94,6 +115,8 @@ impl ProcessExecutionCore {
                 entries: BTreeMap::new(),
                 handles: HashMap::new(),
                 starts: HashMap::new(),
+                runs: HashMap::new(),
+                pending_run_terminations: HashMap::new(),
                 next_sequence: 1,
                 shutting_down: false,
             }),
@@ -112,11 +135,10 @@ impl ProcessExecutionCore {
                 let Some(inner) = weak.upgrade() else {
                     break;
                 };
-                inner
-                    .registry
-                    .lock()
-                    .unwrap()
-                    .cleanup(inner.config.limits.finished_retention);
+                inner.registry.lock().unwrap().cleanup(
+                    inner.config.limits.finished_retention,
+                    inner.config.limits.run_output_retention,
+                );
             }
         });
         Ok(core)
@@ -188,10 +210,13 @@ impl ProcessExecutionCore {
         };
         let (session, retry) = {
             let mut registry = self.0.registry.lock().unwrap();
-            registry.cleanup(self.0.config.limits.finished_retention);
+            registry.cleanup(
+                self.0.config.limits.finished_retention,
+                self.0.config.limits.run_output_retention,
+            );
             if let Some(sequence) = registry.starts.get(&request.start_id) {
                 let entry = &registry.entries[sequence];
-                if entry.request != request {
+                if entry.start_request.as_ref() != Some(&request) {
                     return Err(Error::new(
                         ErrorCode::IdempotencyConflict,
                         "start_id was used for different arguments",
@@ -236,7 +261,7 @@ impl ProcessExecutionCore {
                     output_incomplete: false,
                     input_error: None,
                 };
-                let session = Session::new(execution, self.0.config.limits.clone());
+                let session = Session::new(execution, self.0.config.limits.clone(), None);
                 let sequence = registry.next_sequence;
                 registry.next_sequence += 1;
                 registry
@@ -246,7 +271,8 @@ impl ProcessExecutionCore {
                 registry.entries.insert(
                     sequence,
                     Entry {
-                        request: request.clone(),
+                        start_request: Some(request.clone()),
+                        run_request: None,
                         session: session.clone(),
                     },
                 );
@@ -271,6 +297,250 @@ impl ProcessExecutionCore {
             },
         )
         .await
+    }
+
+    /// Run a non-interactive command through completion while spooling all captured output.
+    pub async fn run_execution(&self, request: RunRequest) -> Result<RunResult> {
+        let output_limit = self.output_limit(request.max_output_bytes)?;
+        if request.run_id.is_empty() || request.run_id.len() > 256 {
+            return Err(Error::invalid("run_id must contain 1 to 256 bytes"));
+        }
+        if request.timeout_ms == Some(0) {
+            return Err(Error::invalid("timeout_ms must be positive when present"));
+        }
+        validate_env(&request.env)?;
+        if let Some(snapshot) = &request.shell_snapshot {
+            shell_snapshot::validate_scope_id(&snapshot.scope_id)?;
+        }
+        let (mut executable, mut args, resolved_shell) =
+            shell::prepare(&request.command, &self.0.info.default_shell)?;
+        let cwd = match &request.cwd {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => self.0.config.cwd.join(path),
+            None => self.0.config.cwd.clone(),
+        };
+        let mut env = self.0.config.env.clone();
+        let selected_shell = resolved_shell
+            .as_ref()
+            .unwrap_or(&self.0.info.default_shell);
+        let snapshot = if let Some(snapshot_request) = &request.shell_snapshot {
+            self.0
+                .shell_snapshots
+                .get(
+                    &snapshot_request.scope_id,
+                    selected_shell,
+                    &cwd,
+                    &self.0.config.env,
+                )
+                .await
+                .ok()
+        } else {
+            None
+        };
+        if let Some(snapshot) = &snapshot {
+            merge_env(&mut env, snapshot.env.clone());
+        }
+        merge_env(&mut env, self.0.configured_env.clone());
+        merge_env(&mut env, request.env.clone());
+        if let (Command::Shell { script, .. }, Some(snapshot)) = (&request.command, &snapshot) {
+            let wrapped = shell_snapshot::install_state(&mut env, &snapshot.state, script);
+            let selected = resolved_shell
+                .as_ref()
+                .expect("shell commands always resolve a shell");
+            let prepared = shell::prepare_resolved(selected, &wrapped, false);
+            executable = prepared.0;
+            args = prepared.1;
+        }
+        let launch = backend::Launch {
+            executable,
+            args,
+            cwd: cwd.clone(),
+            env,
+            io: IoMode::Pipes { stdin: false },
+        };
+        let (session, retry, cancelled) = {
+            let mut registry = self.0.registry.lock().unwrap();
+            registry.cleanup(
+                self.0.config.limits.finished_retention,
+                self.0.config.limits.run_output_retention,
+            );
+            if let Some(sequence) = registry.runs.get(&request.run_id) {
+                let entry = &registry.entries[sequence];
+                if entry.run_request.as_ref() != Some(&request) {
+                    return Err(Error::new(
+                        ErrorCode::IdempotencyConflict,
+                        "run_id was used for different arguments",
+                    ));
+                }
+                (entry.session.clone(), true, None)
+            } else {
+                if registry.shutting_down {
+                    return Err(Error::new(
+                        ErrorCode::Unavailable,
+                        "runtime is shutting down",
+                    ));
+                }
+                let active = registry
+                    .entries
+                    .values()
+                    .filter(|entry| entry.session.snapshot().state != ExecutionState::Finished)
+                    .count();
+                if active >= self.0.config.limits.max_active_executions
+                    || registry.entries.len() >= self.0.config.limits.max_retained_executions
+                {
+                    return Err(Error::new(
+                        ErrorCode::ResourceLimit,
+                        "execution capacity reached",
+                    ));
+                }
+                let spool = OutputSpool::create(
+                    self.0
+                        .config
+                        .run_output_directory
+                        .as_deref()
+                        .expect("run output directory is resolved"),
+                    self.0.config.limits.max_output_bytes_per_response,
+                )?;
+                let execution = Execution {
+                    handle: ExecutionHandle {
+                        id: Uuid::new_v4(),
+                        generation_id: self.0.info.generation_id,
+                    },
+                    command: request.command.clone(),
+                    resolved_shell,
+                    cwd,
+                    io: IoMode::Pipes { stdin: false },
+                    labels: request.labels.clone(),
+                    state: ExecutionState::Starting,
+                    result: None,
+                    created_at: SystemTime::now(),
+                    started_at: None,
+                    finished_at: None,
+                    output_incomplete: false,
+                    input_error: None,
+                };
+                let session = Session::new(execution, self.0.config.limits.clone(), Some(spool));
+                let sequence = registry.next_sequence;
+                registry.next_sequence += 1;
+                registry
+                    .handles
+                    .insert(session.snapshot().handle.id, sequence);
+                registry.runs.insert(request.run_id.clone(), sequence);
+                let cancelled = registry.pending_run_terminations.remove(&request.run_id);
+                registry.entries.insert(
+                    sequence,
+                    Entry {
+                        start_request: None,
+                        run_request: Some(request.clone()),
+                        session: session.clone(),
+                    },
+                );
+                (session, false, cancelled)
+            }
+        };
+        if !retry {
+            if cancelled.is_some() {
+                session.finish(ExecutionResult::Terminated {
+                    exit_code: None,
+                    signal: None,
+                });
+            } else {
+                tokio::spawn(session::run(
+                    session.clone(),
+                    launch,
+                    self.0.shutdown.clone(),
+                ));
+                if let Some(timeout_ms) = request.timeout_ms {
+                    let timed = session.clone();
+                    let grace = self.0.config.limits.termination_grace;
+                    tokio::spawn(async move {
+                        timed.wait_launched().await;
+                        if timed.snapshot().state == ExecutionState::Finished {
+                            return;
+                        }
+                        tokio::select! {
+                            () = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
+                                timed.terminate(grace, StopReason::Timeout);
+                            }
+                            () = timed.wait_finished() => {}
+                        }
+                    });
+                }
+            }
+        }
+        session.wait_finished().await;
+        let finished_at = session
+            .snapshot()
+            .finished_at
+            .unwrap_or_else(SystemTime::now);
+        session.run_result(
+            request.run_id,
+            output_limit,
+            finished_at + self.0.config.limits.run_output_retention,
+        )
+    }
+
+    /// Terminate a run by stable identity. An early cancellation is retained for a racing run.
+    pub async fn terminate_run(
+        &self,
+        run_id: impl Into<String>,
+        grace: Option<Duration>,
+    ) -> Result<TerminateRunReceipt> {
+        let run_id = run_id.into();
+        if run_id.is_empty() || run_id.len() > 256 {
+            return Err(Error::invalid("run_id must contain 1 to 256 bytes"));
+        }
+        let grace = grace.unwrap_or(self.0.config.limits.termination_grace);
+        if grace > self.0.config.limits.max_termination_grace {
+            return Err(Error::invalid("termination grace exceeds maximum"));
+        }
+        let session = {
+            let mut registry = self.0.registry.lock().unwrap();
+            registry.cleanup(
+                self.0.config.limits.finished_retention,
+                self.0.config.limits.run_output_retention,
+            );
+            registry
+                .runs
+                .get(&run_id)
+                .map(|sequence| registry.entries[sequence].session.clone())
+        };
+        let Some(session) = session else {
+            let mut registry = self.0.registry.lock().unwrap();
+            if registry.pending_run_terminations.len()
+                >= self.0.config.limits.max_retained_executions
+            {
+                return Err(Error::new(
+                    ErrorCode::ResourceLimit,
+                    "pending run termination capacity reached",
+                ));
+            }
+            registry
+                .pending_run_terminations
+                .entry(run_id.clone())
+                .or_insert(PendingRunTermination {
+                    created_at: Instant::now(),
+                });
+            return Ok(TerminateRunReceipt {
+                run_id,
+                state: TerminateRunState::Pending,
+                execution: None,
+            });
+        };
+        let execution = session.snapshot();
+        if execution.state == ExecutionState::Finished {
+            return Ok(TerminateRunReceipt {
+                run_id,
+                state: TerminateRunState::Finished,
+                execution: Some(execution),
+            });
+        }
+        let execution = session.terminate(grace, StopReason::ExplicitTermination);
+        Ok(TerminateRunReceipt {
+            run_id,
+            state: TerminateRunState::Terminating,
+            execution: Some(execution),
+        })
     }
 
     pub async fn get_execution(&self, handle: ExecutionHandle) -> Result<Execution> {
@@ -376,7 +646,9 @@ impl ProcessExecutionCore {
         if grace > self.0.config.limits.max_termination_grace {
             return Err(Error::invalid("termination grace exceeds maximum"));
         }
-        Ok(self.session(handle)?.terminate(grace))
+        Ok(self
+            .session(handle)?
+            .terminate(grace, StopReason::ExplicitTermination))
     }
 
     pub async fn resize_terminal(
@@ -408,7 +680,10 @@ impl ProcessExecutionCore {
             return Err(Error::invalid("list limit must be positive"));
         }
         let mut registry = self.0.registry.lock().unwrap();
-        registry.cleanup(self.0.config.limits.finished_retention);
+        registry.cleanup(
+            self.0.config.limits.finished_retention,
+            self.0.config.limits.run_output_retention,
+        );
         let (after, through) = if let Some(cursor) = &request.page_cursor {
             self.generation(cursor.generation_id)?;
             if cursor.state != request.state || cursor.labels != request.labels {
@@ -477,7 +752,10 @@ impl ProcessExecutionCore {
         };
         self.0.shutdown.cancel();
         for session in &sessions {
-            session.terminate(self.0.config.limits.termination_grace);
+            session.terminate(
+                self.0.config.limits.termination_grace,
+                StopReason::RuntimeShutdown,
+            );
         }
         for session in sessions {
             session.wait_finished().await;
@@ -488,7 +766,10 @@ impl ProcessExecutionCore {
     fn session(&self, handle: ExecutionHandle) -> Result<Arc<Session>> {
         self.generation(handle.generation_id)?;
         let mut registry = self.0.registry.lock().unwrap();
-        registry.cleanup(self.0.config.limits.finished_retention);
+        registry.cleanup(
+            self.0.config.limits.finished_retention,
+            self.0.config.limits.run_output_retention,
+        );
         let sequence = registry.handles.get(&handle.id).ok_or_else(|| {
             Error::new(
                 ErrorCode::NotFound,
@@ -528,11 +809,18 @@ impl ProcessExecutionCore {
 }
 
 impl Registry {
-    fn cleanup(&mut self, retention: Duration) {
+    fn cleanup(&mut self, retention: Duration, run_retention: Duration) {
+        self.pending_run_terminations
+            .retain(|_, value| value.created_at.elapsed() < run_retention);
         let expired: Vec<_> = self
             .entries
             .iter()
             .filter_map(|(sequence, entry)| {
+                let retention = if entry.run_request.is_some() {
+                    run_retention
+                } else {
+                    retention
+                };
                 entry
                     .session
                     .data
@@ -546,7 +834,13 @@ impl Registry {
         for sequence in expired {
             let entry = self.entries.remove(&sequence).unwrap();
             self.handles.remove(&entry.session.snapshot().handle.id);
-            self.starts.remove(&entry.request.start_id);
+            if let Some(request) = entry.start_request {
+                self.starts.remove(&request.start_id);
+            }
+            if let Some(request) = entry.run_request {
+                self.runs.remove(&request.run_id);
+                entry.session.remove_output_file();
+            }
         }
     }
 }
