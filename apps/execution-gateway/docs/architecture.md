@@ -155,8 +155,10 @@ version and request identity only at dispatch time. In one transaction it:
 4. Verifies the optional expected runtime generation.
 5. Inserts both `jobs` and `job_requests`.
 
-The fingerprint covers the machine ID and normalized request. An identical retry
-returns the existing job; changed input with the same key returns a conflict. The
+The fingerprint covers the machine ID, normalized request, and optional opaque client
+context. An identical retry returns the existing job; adding, removing, or changing
+client context or other input with the same key returns a conflict. An omitted context
+retains the pre-feature fingerprint shape for compatibility with existing jobs. The
 fingerprint remains after request-input cleanup so idempotency remains effective.
 
 ### Dispatch and completion
@@ -281,7 +283,7 @@ wire-compatible protocol data.
 | `user_api_keys` | Hashed user credentials and revocation metadata | Unique hash; many keys per user |
 | `machines` | Ownership, enrollment identity, credential version, last runtime metadata | One current credential; soft deletion |
 | `machine_registration_tokens` | Short-lived enrollment tokens | Hashed, single-use, expiring |
-| `jobs` | Idempotency, lifecycle, pinned generation, response, gateway error | Unique user/idempotency key; terminal timestamp invariant |
+| `jobs` | Idempotency, lifecycle, pinned generation, opaque client context, response, gateway error | Unique user/idempotency key; terminal timestamp and client-context type invariants |
 | `job_requests` | Normalized operation or batch input | One per job; independently expires |
 | `webhook_deliveries` | Transactional outbox event and current delivery state | One immutable event per terminal job |
 | `webhook_delivery_attempts` | Individual HTTP attempt outcomes | Increasing number unique within a delivery |
@@ -300,12 +302,14 @@ response to measured query plans rather than anticipated JSON access patterns.
 The terminal job transaction captures the user's callback URL and writes one immutable
 event. Callback I/O happens later, outside database transactions.
 
-Version 2 events contain only `schemaVersion`, `eventId`, `type`, `jobId`, `machineId`,
-and `completedAt`. Consumers durably accept this wake-up event and retrieve the response
-or gateway error from the job endpoint. This avoids duplicating potentially large
-execution responses in the outbox and receiver inbox. Migrated users remain on the
-legacy version 1 schema until they opt in; new users default to version 2. Historical
-delivery payloads remain immutable.
+Version 2 events contain `schemaVersion`, `eventId`, `type`, `jobId`, `machineId`, and
+`completedAt`, plus the unchanged `clientContext` object when the submission supplied
+one. Consumers durably accept this wake-up event and retrieve the response or gateway
+error from the job endpoint. This avoids duplicating potentially large execution
+responses in the outbox and receiver inbox. Migrated users remain on the legacy version
+1 schema until they opt in; new users default to version 2. Client context behaves the
+same in both versions and is omitted when absent. Historical delivery payloads remain
+immutable.
 
 The worker claims one eligible delivery with `FOR UPDATE SKIP LOCKED`, creates an attempt,
 and assigns a 60-second lease. It then decrypts the current user secret, signs the exact

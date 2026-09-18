@@ -8,7 +8,7 @@ use crate::{ApiPath as Path, ApiQuery as Query};
 use axum::{Extension, Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
 use process_execution_protocol::{self as protocol, Operation, Payload, Request, Response};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use sqlx::{FromRow, Postgres, QueryBuilder, Transaction};
 use std::{collections::HashSet, time::Duration};
@@ -34,6 +34,8 @@ const COLUMNS: &str = "id,user_id,machine_id,idempotency_key,status,runtime_gene
 pub struct Submit {
     machine_id: Uuid,
     idempotency_key: String,
+    #[serde(default, deserialize_with = "deserialize_client_context")]
+    client_context: Option<Value>,
     request: Value,
 }
 #[derive(Default, Deserialize)]
@@ -73,6 +75,31 @@ impl Wait {
 }
 fn terminal(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "unknown")
+}
+
+fn deserialize_client_context<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(de::Error::custom("clientContext must be an object"))
+    }
+}
+
+fn fingerprint(machine: Uuid, request: &Value, client_context: &Option<Value>) -> Result<String> {
+    let mut input = json!({"machineId": machine, "request": request});
+    if let Some(client_context) = client_context {
+        input
+            .as_object_mut()
+            .ok_or_else(Error::internal)?
+            .insert("clientContext".into(), client_context.clone());
+    }
+    Ok(crypto::hash(&serde_json::to_vec(&input)?))
 }
 
 pub fn normalize(value: Value) -> Result<Value> {
@@ -182,9 +209,7 @@ pub async fn submit(
         ));
     }
     let request = normalize(input.request)?;
-    let fingerprint = crypto::hash(&serde_json::to_vec(
-        &json!({"machineId": input.machine_id, "request": request}),
-    )?);
+    let fingerprint = fingerprint(input.machine_id, &request, &input.client_context)?;
     let mut tx = state.pool.begin().await?;
     // Serialize one user's admission and idempotency checks; the unique constraint is authoritative.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
@@ -245,8 +270,8 @@ pub async fn submit(
             "user has too many outstanding jobs",
         ));
     }
-    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash) VALUES($1,$2,$3,$4,$5)")
-        .bind(id).bind(user).bind(input.machine_id).bind(input.idempotency_key).bind(fingerprint).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash,client_context) VALUES($1,$2,$3,$4,$5,$6)")
+        .bind(id).bind(user).bind(input.machine_id).bind(input.idempotency_key).bind(fingerprint).bind(input.client_context).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO job_requests(job_id,request) VALUES($1,$2)")
         .bind(id)
         .bind(request)
@@ -377,9 +402,9 @@ pub async fn finish_tx(
     error: Option<Value>,
     retention: i32,
 ) -> Result<()> {
-    let updated: Option<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as("UPDATE jobs SET status=$2,response=$3,error=$4,finished_at=clock_timestamp(),recovery_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND status IN ('queued','dispatching','waiting_response') RETURNING user_id,machine_id,finished_at")
+    let updated: Option<(Uuid, Uuid, DateTime<Utc>, Option<Value>)> = sqlx::query_as("UPDATE jobs SET status=$2,response=$3,error=$4,finished_at=clock_timestamp(),recovery_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND status IN ('queued','dispatching','waiting_response') RETURNING user_id,machine_id,finished_at,client_context")
         .bind(id).bind(status).bind(&response).bind(&error).fetch_optional(&mut **tx).await?;
-    let Some((user, machine, finished)) = updated else {
+    let Some((user, machine, finished, client_context)) = updated else {
         return Ok(());
     };
     let (callback, payload_version): (String, i32) = sqlx::query_as(
@@ -411,6 +436,7 @@ pub async fn finish_tx(
         finished,
         &response,
         &error,
+        &client_context,
     )?;
     sqlx::query("INSERT INTO webhook_deliveries(id,job_id,user_id,event_type,callback_url,payload) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(event).bind(id).bind(user).bind(event_type).bind(callback).bind(payload).execute(&mut **tx).await?;
@@ -427,8 +453,9 @@ fn terminal_event(
     completed: DateTime<Utc>,
     response: &Option<Value>,
     error: &Option<Value>,
+    client_context: &Option<Value>,
 ) -> Result<Value> {
-    match version {
+    let mut payload = match version {
         1 => Ok(
             json!({"eventId": event, "type": event_type, "jobId": job, "machineId": machine, "completedAt": completed, "response": response, "error": error}),
         ),
@@ -441,7 +468,14 @@ fn terminal_event(
             completed_at: completed,
         })?),
         _ => Err(Error::internal()),
+    }?;
+    if let Some(client_context) = client_context {
+        payload
+            .as_object_mut()
+            .ok_or_else(Error::internal)?
+            .insert("clientContext".into(), client_context.clone());
     }
+    Ok(payload)
 }
 pub async fn finish(state: &AppState, id: Uuid, status: &str, error: Value) -> Result<()> {
     let mut tx = state.pool.begin().await?;
@@ -628,7 +662,8 @@ pub async fn housekeeping_once(state: &AppState) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WAIT_MS, Wait, terminal_event};
+    use super::{MAX_WAIT_MS, Submit, Wait, fingerprint, terminal_event};
+    use crate::crypto;
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
@@ -686,6 +721,7 @@ mod tests {
             completed,
             &response,
             &None,
+            &None,
         )
         .unwrap();
         assert_eq!(legacy["response"], expected_response);
@@ -700,6 +736,7 @@ mod tests {
             completed,
             &None,
             &None,
+            &None,
         )
         .unwrap();
         assert_eq!(payload["eventId"], event.to_string());
@@ -708,5 +745,87 @@ mod tests {
         assert_eq!(payload["type"], "job.succeeded");
         assert_eq!(payload["schemaVersion"], 2);
         assert_eq!(payload.as_object().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn submission_context_is_an_optional_object() {
+        let machine = Uuid::new_v4();
+        let submission = |client_context: Option<serde_json::Value>| {
+            let mut value = json!({
+                "machineId": machine,
+                "idempotencyKey": "fixture",
+                "request": {"operation": "runtime.info"}
+            });
+            if let Some(client_context) = client_context {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("clientContext".into(), client_context);
+            }
+            serde_json::from_value::<Submit>(value)
+        };
+        assert!(submission(None).is_ok());
+        assert!(submission(Some(json!({}))).is_ok());
+        for invalid in [json!(null), json!([]), json!("opaque"), json!(42)] {
+            assert!(submission(Some(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn omitted_context_preserves_legacy_fingerprints_and_context_changes_them() {
+        let machine = Uuid::new_v4();
+        let request = json!({"operation":"runtime.info"});
+        let legacy = crypto::hash(
+            &serde_json::to_vec(&json!({"machineId":machine,"request":request})).unwrap(),
+        );
+        assert_eq!(fingerprint(machine, &request, &None).unwrap(), legacy);
+        assert_ne!(
+            fingerprint(machine, &request, &Some(json!({}))).unwrap(),
+            legacy
+        );
+        assert_ne!(
+            fingerprint(machine, &request, &Some(json!({"reference":"one"}))).unwrap(),
+            fingerprint(machine, &request, &Some(json!({"reference":"two"}))).unwrap()
+        );
+    }
+
+    #[test]
+    fn every_terminal_event_preserves_or_omits_context() {
+        let context = Some(json!({
+            "receiver": "tool-pi-bash-v1",
+            "reference": "opaque-reference",
+            "nested": {"values": [1, true, null]}
+        }));
+        for version in [1, 2] {
+            for status in ["succeeded", "failed", "unknown"] {
+                let payload = terminal_event(
+                    version,
+                    Uuid::new_v4(),
+                    format!("job.{status}"),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Utc::now(),
+                    &None,
+                    &None,
+                    &context,
+                )
+                .unwrap();
+                assert_eq!(payload["clientContext"], context.clone().unwrap());
+
+                let omitted = terminal_event(
+                    version,
+                    Uuid::new_v4(),
+                    format!("job.{status}"),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Utc::now(),
+                    &None,
+                    &None,
+                    &None,
+                )
+                .unwrap();
+                assert!(omitted.get("clientContext").is_none());
+            }
+        }
     }
 }
