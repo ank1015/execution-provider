@@ -375,6 +375,64 @@ async fn shell_commands_use_the_discovered_shell() {
 }
 
 #[tokio::test]
+async fn run_returns_a_tail_file_reference_and_can_be_terminated_by_run_id() {
+    let server = Server::start().await;
+    let result = server
+        .ok(&server.request(
+            "execution.run",
+            json!({
+                "run_id": "bounded-run",
+                "command": {"type": "program", "executable": fixture(), "args": ["bytes", "257"]},
+                "max_output_bytes": 31
+            }),
+        ))
+        .await;
+    assert_eq!(result["execution"]["result"]["reason"], "exited");
+    assert_eq!(result["output_file"]["size_bytes"], 257);
+    assert_eq!(result["output_truncated"], true);
+    assert_eq!(
+        output_bytes(&result),
+        (226..257).map(|n| (n % 256) as u8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        std::fs::metadata(result["output_file"]["path"].as_str().unwrap())
+            .unwrap()
+            .len(),
+        257
+    );
+
+    let request = server.request(
+        "execution.run",
+        json!({
+            "run_id": "cancelled-run",
+            "command": {"type": "program", "executable": fixture(), "args": ["sleep"]}
+        }),
+    );
+    let run = spawn_rpc(&server.endpoint, &request).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let termination = server
+        .ok(&server.request(
+            "execution.terminate_run",
+            json!({"run_id": "cancelled-run", "grace_period_ms": 30}),
+        ))
+        .await;
+    assert!(matches!(
+        termination["state"].as_str(),
+        Some("terminating" | "finished")
+    ));
+    let output = tokio::time::timeout(Duration::from_secs(5), run.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        response["result"]["execution"]["result"]["reason"],
+        "terminated"
+    );
+}
+
+#[tokio::test]
 async fn pipe_interrupt_matches_the_advertised_capability() {
     let server = Server::start().await;
     let result = server
