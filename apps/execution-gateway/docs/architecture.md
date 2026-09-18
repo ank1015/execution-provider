@@ -26,6 +26,8 @@ The current architecture is built around these guarantees:
 The gateway is not a process supervisor. The daemon owns processes, output buffers,
 execution handles, and operation retry records. A successful `execution.start` response
 can refer to a process that continues after the gateway job has completed.
+An `execution.run` job instead remains pending until the daemon returns its terminal
+result and bounded output tail; its complete output file remains on the machine.
 
 ## System context
 
@@ -176,8 +178,10 @@ stateDiagram-v2
     unknown --> [*]
 ```
 
-Each connection polls queued work in creation order and permits up to 32 outstanding
-requests. Before sending, the gateway rechecks the user, machine, deletion state, and
+Each connection normally permits up to 32 outstanding requests. Single
+`execution.terminate_run` jobs are prioritized and have four additional reserved slots,
+so long-running runs cannot consume all cancellation capacity. Before sending, the
+gateway rechecks the user, machine, deletion state, and
 credential version. It records `dispatching`, the runtime generation, and negotiated
 recovery support before writing to the socket.
 
@@ -252,6 +256,13 @@ batch response, just like a process started by a single operation.
 Callers use `execution.get`, `execution.observe`, `execution.list`, and control
 operations in later jobs. The execution handle includes the runtime generation, which
 prevents a handle from silently addressing a replacement runtime.
+
+`execution.run` is different only in operation lifetime: the daemon keeps the request
+receipt pending until its non-interactive process finishes and the complete output file
+is finalized. The response contains a bounded tail and machine-local artifact metadata.
+`execution.terminate_run` is a separate, prioritized job addressed by stable `run_id`;
+transport disconnects do not imply cancellation. Gateway completion persistence and
+webhook delivery otherwise use the normal job path.
 
 Filesystem reads are bounded and content-addressed. Writes and removals carry stable
 mutation identities plus missing-file or SHA-256 preconditions. Each file mutation is
