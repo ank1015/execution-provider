@@ -37,6 +37,8 @@ use uuid::Uuid;
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PENDING_REQUESTS: usize = 32;
+const RESERVED_CONTROL_REQUESTS: usize = 4;
 
 #[derive(Clone)]
 struct Live {
@@ -290,9 +292,12 @@ async fn connected(
                     if pending.contains(&job) {
                         send(&outgoing, encode(&GatewayMessage::Recover { request_id: job.to_string(), generation_id: generation })?)?;
                     }
-                } else if pending.len() < 32 && let Some((job, request)) = jobs::dispatch_next(state, machine, generation, version, recovery).await? {
-                    pending.insert(job);
-                    send(&outgoing, encode(&GatewayMessage::Request { request: Box::new(request) })?)?;
+                } else if pending.len() < MAX_PENDING_REQUESTS + RESERVED_CONTROL_REQUESTS {
+                    let control_only = pending.len() >= MAX_PENDING_REQUESTS;
+                    if let Some((job, request)) = jobs::dispatch_next(state, machine, generation, version, recovery, control_only).await? {
+                        pending.insert(job);
+                        send(&outgoing, encode(&GatewayMessage::Request { request: Box::new(request) })?)?;
+                    }
                 }
             }
             message = source.next() => {

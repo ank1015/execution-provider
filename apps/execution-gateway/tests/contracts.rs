@@ -32,6 +32,24 @@ fn request_validation_preserves_protocol_semantics() {
     .unwrap();
     assert_eq!(filesystem["operation"], "filesystem.write_file");
     assert_eq!(filesystem["params"]["data_base64"], "AP8=");
+    let run = jobs::normalize(json!({
+        "operation":"execution.run",
+        "params":{
+            "run_id":"run-1",
+            "command":{"type":"program","executable":"cargo","args":["test"]},
+            "timeout_ms":300000,
+            "max_output_bytes":65536
+        }
+    }))
+    .unwrap();
+    assert_eq!(run["operation"], "execution.run");
+    assert_eq!(run["params"]["timeout_ms"], 300000);
+    let terminate = jobs::normalize(json!({
+        "operation":"execution.terminate_run",
+        "params":{"run_id":"run-1","grace_period_ms":2000}
+    }))
+    .unwrap();
+    assert_eq!(terminate["operation"], "execution.terminate_run");
     let id = Uuid::new_v4();
     let generation = Uuid::new_v4();
     let wire = jobs::wire_request(normalized, id, generation).unwrap();
@@ -47,6 +65,7 @@ fn request_validation_preserves_protocol_semantics() {
         json!({"mode":"unsupported","operations":[{"request_id":"a","operation":"runtime.info"}]}),
         json!({"accepted_error_codes":["unknown"],"operations":[{"request_id":"a","operation":"runtime.info"}]}),
         json!({"accepted_error_codes":["not_found"],"operation":"runtime.info"}),
+        json!({"operations":[{"request_id":"cancel","operation":"execution.terminate_run","params":{"run_id":"run-1"}}]}),
     ] {
         assert!(jobs::normalize(invalid).is_err());
     }
