@@ -24,7 +24,7 @@ read_secret() {
 database_url="$(read_secret execution-gateway-2-database-url)"
 admin_api_key="$(read_secret execution-gateway-2-admin-api-key)"
 encryption_key="$(read_secret execution-gateway-2-encryption-key)"
-webhook_allowed_origins="${WEBHOOK_ALLOWED_ORIGINS:-https://streak-upscale-okay.ngrok-free.dev}"
+webhook_allowed_origins="${WEBHOOK_ALLOWED_ORIGINS:-https://execution-callbacks.acentric.dev}"
 
 {
   printf 'DATABASE_URL=%s\n' "$database_url"
