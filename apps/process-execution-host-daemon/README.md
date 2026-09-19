@@ -207,6 +207,16 @@ background daemon does not open a console window. `connect` waits for the daemon
 to acquire its state lock and returns an error if startup does not complete within 15
 seconds.
 
+`connect` also snapshots the caller's non-empty `PATH` into the generated user service.
+This lets background executions discover the same tools as the shell that installed the
+service without assuming platform- or package-manager-specific directories. No other
+shell variables are copied. Run `connect` again after changing the list of directories in
+`PATH`; installing another executable into an existing directory needs no refresh.
+Foreground `run` inherits its caller's environment directly. An explicit
+`execution.env.PATH` in the runtime configuration takes precedence over the captured
+service value, which is useful when `connect` is invoked from a GUI or automation with a
+minimal environment.
+
 `update` reads `https://downloads.acentric.dev/latest/manifest.json`, chooses the archive
 for the current OS and architecture, verifies the declared byte length and SHA-256 digest,
 extracts only the daemon executable, and atomically replaces the running installation.

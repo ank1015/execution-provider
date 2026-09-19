@@ -9,6 +9,7 @@ pub struct Service {
     executable: PathBuf,
     state_dir: PathBuf,
     config: Option<PathBuf>,
+    environment_path: Option<OsString>,
 }
 
 impl Service {
@@ -20,6 +21,7 @@ impl Service {
             executable,
             state_dir,
             config,
+            environment_path: captured_path(),
         })
     }
 
@@ -45,6 +47,7 @@ impl Service {
             executable,
             state_dir,
             config: None,
+            environment_path: captured_path(),
         }
     }
 
@@ -60,6 +63,10 @@ impl Service {
         }
         arguments
     }
+}
+
+fn captured_path() -> Option<OsString> {
+    std::env::var_os("PATH").filter(|value| !value.is_empty())
 }
 
 fn run(mut command: Command, description: &str) -> Result<()> {
@@ -155,6 +162,16 @@ mod platform {
             .map(|value| format!("    <string>{}</string>", xml(value)))
             .collect::<Vec<_>>()
             .join("\n");
+        let environment = service
+            .environment_path
+            .as_ref()
+            .map(|path| {
+                format!(
+                    "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key><string>{}</string>\n  </dict>\n",
+                    xml(&path.to_string_lossy())
+                )
+            })
+            .unwrap_or_default();
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -165,7 +182,7 @@ mod platform {
   <array>
 {arguments}
   </array>
-  <key>RunAtLoad</key><true/>
+{environment}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
   <key>StandardErrorPath</key><string>{}</string>
 </dict>
@@ -194,11 +211,14 @@ mod platform {
                 executable: PathBuf::from("/tmp/a & b/daemon"),
                 state_dir: PathBuf::from("/tmp/state dir"),
                 config: Some(PathBuf::from("/tmp/<host>.json")),
+                environment_path: Some(OsString::from("/opt/a & b/bin:/usr/bin")),
             };
             let value = plist(&service, std::path::Path::new("/tmp/logs"));
             assert!(value.contains("/tmp/a &amp; b/daemon"));
             assert!(value.contains("<string>--state-dir</string>"));
             assert!(value.contains("/tmp/&lt;host&gt;.json"));
+            assert!(value.contains("<key>EnvironmentVariables</key>"));
+            assert!(value.contains("<key>PATH</key><string>/opt/a &amp; b/bin:/usr/bin</string>"));
         }
     }
 }
@@ -266,9 +286,28 @@ mod platform {
     fn unit(service: &Service) -> String {
         let mut command = vec![systemd_quote(&service.executable)];
         command.extend(service.arguments().iter().map(systemd_quote));
+        let environment = service
+            .environment_path
+            .as_ref()
+            .map(|path| format!("{}\n", systemd_environment("PATH", path)))
+            .unwrap_or_default();
         format!(
-            "[Unit]\nDescription=Acentric process execution host\n\n[Service]\nExecStart={}\nRestart=on-failure\nRestartSec=5\nRestartPreventExitStatus=2\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=Acentric process execution host\n\n[Service]\n{environment}ExecStart={}\nRestart=on-failure\nRestartSec=5\nRestartPreventExitStatus=2\n\n[Install]\nWantedBy=default.target\n",
             command.join(" ")
+        )
+    }
+
+    fn systemd_environment(name: &str, value: impl AsRef<std::ffi::OsStr>) -> String {
+        let value = value.as_ref().to_string_lossy();
+        format!(
+            "Environment=\"{name}={}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+                .replace('%', "%%")
         )
     }
 
@@ -294,10 +333,12 @@ mod platform {
                 executable: PathBuf::from("/tmp/a b/daemon"),
                 state_dir: PathBuf::from("/tmp/state%dir"),
                 config: None,
+                environment_path: Some(OsString::from("/opt/a b/bin:/tmp/%n:$literal:/usr/bin")),
             };
             let value = unit(&service);
             assert!(value.contains("\"/tmp/a b/daemon\""));
             assert!(value.contains("\"/tmp/state%%dir\""));
+            assert!(value.contains("Environment=\"PATH=/opt/a b/bin:/tmp/%%n:$literal:/usr/bin\""));
             assert!(value.contains("RestartPreventExitStatus=2"));
         }
     }
@@ -365,7 +406,15 @@ mod platform {
     fn runner_script(service: &Service) -> String {
         let mut command = vec![powershell_literal(service.executable.as_os_str())];
         command.extend(service.arguments().iter().map(powershell_literal));
-        format!("& {}\r\nexit $LASTEXITCODE\r\n", command.join(" "))
+        let environment = service
+            .environment_path
+            .as_ref()
+            .map(|path| format!("$env:Path = {}\r\n", powershell_literal(path)))
+            .unwrap_or_default();
+        format!(
+            "{environment}& {}\r\nexit $LASTEXITCODE\r\n",
+            command.join(" ")
+        )
     }
 
     fn powershell_literal(value: impl AsRef<std::ffi::OsStr>) -> String {
@@ -413,9 +462,13 @@ mod platform {
                 executable: PathBuf::from(r"C:\Program Files\Acentric's\daemon.exe"),
                 state_dir: PathBuf::from(r"C:\Users\Test User\state"),
                 config: None,
+                environment_path: Some(OsString::from(r"C:\Tools O'Brien;C:\Windows\System32")),
             };
             let value = runner_script(&service);
-            assert!(value.starts_with(r#"& 'C:\Program Files\Acentric''s\daemon.exe'"#));
+            assert!(
+                value.starts_with("$env:Path = 'C:\\Tools O''Brien;C:\\Windows\\System32'\r\n")
+            );
+            assert!(value.contains(r#"& 'C:\Program Files\Acentric''s\daemon.exe'"#));
             assert!(value.contains("'--state-dir'"));
             assert!(value.contains(r#"'C:\Users\Test User\state'"#));
             assert!(value.ends_with("exit $LASTEXITCODE\r\n"));
