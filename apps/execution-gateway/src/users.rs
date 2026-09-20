@@ -180,10 +180,10 @@ async fn patch_user(state: &AppState, id: Uuid, input: Update) -> Result<User> {
 }
 
 fn webhook_payload_version(version: i32) -> Result<i32> {
-    if matches!(version, 1 | 2) {
+    if matches!(version, 1..=3) {
         Ok(version)
     } else {
-        Err(Error::invalid("webhookPayloadVersion must be 1 or 2"))
+        Err(Error::invalid("webhookPayloadVersion must be 1, 2, or 3"))
     }
 }
 pub async fn update(

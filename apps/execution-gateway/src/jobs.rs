@@ -63,6 +63,31 @@ struct TerminalJobEventV2 {
     completed_at: DateTime<Utc>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalJobEventV3<'a> {
+    schema_version: u8,
+    event_id: Uuid,
+    r#type: String,
+    job_id: Uuid,
+    machine_id: Uuid,
+    idempotency_key: &'a str,
+    runtime_generation_id: Option<Uuid>,
+    completed_at: DateTime<Utc>,
+    response: &'a Option<Value>,
+    error: &'a Option<Value>,
+}
+
+#[derive(FromRow)]
+struct TerminalSnapshot {
+    user_id: Uuid,
+    machine_id: Uuid,
+    idempotency_key: String,
+    runtime_generation_id: Option<Uuid>,
+    finished_at: DateTime<Utc>,
+    client_context: Option<Value>,
+}
+
 const MAX_WAIT_MS: u64 = 5 * 60 * 1000;
 impl Wait {
     fn timeout(&self) -> Result<Duration> {
@@ -372,8 +397,8 @@ async fn detail(state: &AppState, user: Uuid, id: Uuid) -> Result<Value> {
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(Error::missing)?;
-    let (response, error): (Option<Value>, Option<Value>) =
-        sqlx::query_as("SELECT response,error FROM jobs WHERE id=$1")
+    let (response, error, client_context): (Option<Value>, Option<Value>, Option<Value>) =
+        sqlx::query_as("SELECT response,error,client_context FROM jobs WHERE id=$1")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
@@ -384,6 +409,9 @@ async fn detail(state: &AppState, user: Uuid, id: Uuid) -> Result<Value> {
     let mut value = serde_json::to_value(job)?;
     value["response"] = json!(response);
     value["error"] = json!(error);
+    if let Some(client_context) = client_context {
+        value["clientContext"] = client_context;
+    }
     value["requestStatus"] = json!(if input.is_some() {
         "retained"
     } else {
@@ -402,9 +430,17 @@ pub async fn finish_tx(
     error: Option<Value>,
     retention: i32,
 ) -> Result<()> {
-    let updated: Option<(Uuid, Uuid, DateTime<Utc>, Option<Value>)> = sqlx::query_as("UPDATE jobs SET status=$2,response=$3,error=$4,finished_at=clock_timestamp(),recovery_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND status IN ('queued','dispatching','waiting_response') RETURNING user_id,machine_id,finished_at,client_context")
+    let updated: Option<TerminalSnapshot> = sqlx::query_as("UPDATE jobs SET status=$2,response=$3,error=$4,finished_at=clock_timestamp(),recovery_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND status IN ('queued','dispatching','waiting_response') RETURNING user_id,machine_id,idempotency_key,runtime_generation_id,finished_at,client_context")
         .bind(id).bind(status).bind(&response).bind(&error).fetch_optional(&mut **tx).await?;
-    let Some((user, machine, finished, client_context)) = updated else {
+    let Some(TerminalSnapshot {
+        user_id: user,
+        machine_id: machine,
+        idempotency_key,
+        runtime_generation_id,
+        finished_at: finished,
+        client_context,
+    }) = updated
+    else {
         return Ok(());
     };
     let (callback, payload_version): (String, i32) = sqlx::query_as(
@@ -433,6 +469,8 @@ pub async fn finish_tx(
         event_type.clone(),
         id,
         machine,
+        &idempotency_key,
+        runtime_generation_id,
         finished,
         &response,
         &error,
@@ -450,6 +488,8 @@ fn terminal_event(
     event_type: String,
     job: Uuid,
     machine: Uuid,
+    idempotency_key: &str,
+    runtime_generation_id: Option<Uuid>,
     completed: DateTime<Utc>,
     response: &Option<Value>,
     error: &Option<Value>,
@@ -466,6 +506,18 @@ fn terminal_event(
             job_id: job,
             machine_id: machine,
             completed_at: completed,
+        })?),
+        3 => Ok(serde_json::to_value(TerminalJobEventV3 {
+            schema_version: 3,
+            event_id: event,
+            r#type: event_type,
+            job_id: job,
+            machine_id: machine,
+            idempotency_key,
+            runtime_generation_id,
+            completed_at: completed,
+            response,
+            error,
         })?),
         _ => Err(Error::internal()),
     }?;
@@ -560,17 +612,43 @@ pub async fn response(
         tx.commit().await?;
         return Ok(());
     }
+    let mut stored_response = serde_json::to_value(response)?;
+    // Execution results describe the command for local clients. The gateway already
+    // retains the submitted request separately; terminal results need only the
+    // outcome, bounded preview, and output-file reference.
+    if let Some(result) = stored_response.get_mut("result") {
+        strip_execution_commands(result);
+    }
     finish_tx(
         &mut tx,
         id,
         status,
-        Some(serde_json::to_value(response)?),
+        Some(stored_response),
         None,
         state.config.retention_days,
     )
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+fn strip_execution_commands(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::Object(execution)) = object.get_mut("execution") {
+                execution.remove("command");
+            }
+            for child in object.values_mut() {
+                strip_execution_commands(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_execution_commands(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub async fn recover_inflight(state: &AppState) -> Result<()> {
@@ -662,7 +740,7 @@ pub async fn housekeeping_once(state: &AppState) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WAIT_MS, Submit, Wait, fingerprint, terminal_event};
+    use super::{MAX_WAIT_MS, Submit, Wait, fingerprint, strip_execution_commands, terminal_event};
     use crate::crypto;
     use chrono::Utc;
     use serde_json::json;
@@ -718,6 +796,8 @@ mod tests {
             "job.succeeded".into(),
             job,
             machine,
+            "fixture-key",
+            None,
             completed,
             &response,
             &None,
@@ -733,6 +813,8 @@ mod tests {
             "job.succeeded".into(),
             job,
             machine,
+            "fixture-key",
+            None,
             completed,
             &None,
             &None,
@@ -745,6 +827,101 @@ mod tests {
         assert_eq!(payload["type"], "job.succeeded");
         assert_eq!(payload["schemaVersion"], 2);
         assert_eq!(payload.as_object().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn inline_events_keep_exact_terminal_outcomes_and_correlation() {
+        let event = Uuid::new_v4();
+        let job = Uuid::new_v4();
+        let machine = Uuid::new_v4();
+        let generation = Uuid::new_v4();
+        let context = Some(json!({"receiver":"bash","routeKey":"r","sessionId":"s",
+            "operationId":"o","submissionId":"sub","machineId":machine,
+            "timeoutSeconds":17,"nested":[null,true,{"x":3}]}));
+        for (status, response, error) in [
+            (
+                "succeeded",
+                Some(json!({"status":"ok","result":{"run_id":"r","output":[]}})),
+                None,
+            ),
+            (
+                "failed",
+                Some(json!({"status":"error","error":{"code":"invalid_argument","message":"bad"}})),
+                None,
+            ),
+            (
+                "failed",
+                None,
+                Some(json!({"code":"dispatch_timeout","message":"late"})),
+            ),
+            (
+                "unknown",
+                None,
+                Some(json!({"code":"recovery_unavailable","message":"uncertain"})),
+            ),
+        ] {
+            let payload = terminal_event(
+                3,
+                event,
+                format!("job.{status}"),
+                job,
+                machine,
+                "stable-key",
+                Some(generation),
+                Utc::now(),
+                &response,
+                &error,
+                &context,
+            )
+            .unwrap();
+            assert_eq!(payload["schemaVersion"], 3);
+            assert_eq!(payload["eventId"], event.to_string());
+            assert_eq!(payload["jobId"], job.to_string());
+            assert_eq!(payload["machineId"], machine.to_string());
+            assert_eq!(payload["idempotencyKey"], "stable-key");
+            assert_eq!(payload["runtimeGenerationId"], generation.to_string());
+            assert_eq!(payload["clientContext"], context.clone().unwrap());
+            assert_eq!(payload["response"], json!(response));
+            assert_eq!(payload["error"], json!(error));
+            assert_eq!(payload.as_object().unwrap().len(), 11);
+        }
+        let undispatched = terminal_event(
+            3,
+            event,
+            "job.failed".into(),
+            job,
+            machine,
+            "stable-key",
+            None,
+            Utc::now(),
+            &None,
+            &None,
+            &None,
+        )
+        .unwrap();
+        assert!(undispatched["runtimeGenerationId"].is_null());
+        assert!(undispatched["response"].is_null());
+        assert!(undispatched["error"].is_null());
+        assert!(undispatched.get("clientContext").is_none());
+    }
+
+    #[test]
+    fn stored_execution_results_omit_commands_and_keep_run_fields() {
+        let mut result = json!({"run_id":"r","execution":{"command":{"type":"shell","script":"secret"},
+            "result":{"reason":"timed_out"}},"output_file":{"artifact_id":"a","size_bytes":99},
+            "output":[{"stream":"stdout","data_base64":"YQ=="}],"output_truncated":true});
+        strip_execution_commands(&mut result);
+        assert!(result["execution"].get("command").is_none());
+        assert_eq!(result["execution"]["result"]["reason"], "timed_out");
+        assert_eq!(result["output_file"]["size_bytes"], 99);
+        assert_eq!(result["output"][0]["data_base64"], "YQ==");
+        let mut batch = json!({"results":[{"result":{"execution":{"command":"secret","result":{"reason":"exited"}}}}]});
+        strip_execution_commands(&mut batch);
+        assert!(
+            batch["results"][0]["result"]["execution"]
+                .get("command")
+                .is_none()
+        );
     }
 
     #[test]
@@ -796,7 +973,7 @@ mod tests {
             "reference": "opaque-reference",
             "nested": {"values": [1, true, null]}
         }));
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             for status in ["succeeded", "failed", "unknown"] {
                 let payload = terminal_event(
                     version,
@@ -804,6 +981,8 @@ mod tests {
                     format!("job.{status}"),
                     Uuid::new_v4(),
                     Uuid::new_v4(),
+                    "fixture-key",
+                    None,
                     Utc::now(),
                     &None,
                     &None,
@@ -818,6 +997,8 @@ mod tests {
                     format!("job.{status}"),
                     Uuid::new_v4(),
                     Uuid::new_v4(),
+                    "fixture-key",
+                    None,
                     Utc::now(),
                     &None,
                     &None,

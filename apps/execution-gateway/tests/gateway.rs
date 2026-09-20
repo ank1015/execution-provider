@@ -1,3 +1,4 @@
+use base64::Engine;
 use execution_gateway::{AppState, config::Config, crypto, db, jobs, router, webhooks};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, Method};
@@ -508,9 +509,29 @@ async fn api_registration_jobs_and_isolation() {
                 Some(json!({"webhookPayloadVersion":3}))
             )
             .await
+            .1["webhookPayloadVersion"],
+        3
+    );
+    assert_eq!(
+        gateway
+            .request(
+                Method::PATCH,
+                "/v1/me",
+                &key,
+                Some(json!({"webhookPayloadVersion":4}))
+            )
+            .await
             .0,
         400
     );
+    gateway
+        .request(
+            Method::PATCH,
+            "/v1/me",
+            &key,
+            Some(json!({"webhookPayloadVersion":2})),
+        )
+        .await;
     assert_eq!(
         gateway
             .request(
@@ -796,10 +817,34 @@ async fn api_registration_jobs_and_isolation() {
         .await
         .unwrap();
     assert_eq!(stored_context, client_context);
+    let running_detail = gateway
+        .request(Method::GET, &format!("/v1/jobs/{running}"), &key, None)
+        .await
+        .1;
+    assert_eq!(running_detail["clientContext"], client_context);
     let request = socket.request().await;
     assert!(request.get("clientContext").is_none());
     socket.reply(&request, json!({"execution":{"handle":{"id":Uuid::new_v4(),"generation_id":generation},"state":"running"}})).await;
     assert_eq!(gateway.terminal(&key, running).await["status"], "succeeded");
+    let terminal_replay = gateway.request(Method::POST, "/v1/jobs", &key,
+        Some(json!({"machineId":machine,"idempotencyKey":"start","clientContext":client_context,
+            "request":{"operation":"execution.start","params":{"start_id":"start-1","command":{"type":"program","executable":"fixture"}}}}))).await;
+    assert_eq!(terminal_replay.0, 202);
+    assert_eq!(
+        terminal_replay.1,
+        json!({"id":running,"status":"succeeded"})
+    );
+    let terminal_detail = gateway
+        .request(Method::GET, &format!("/v1/jobs/{running}"), &key, None)
+        .await
+        .1;
+    assert_eq!(terminal_detail["clientContext"], client_context);
+    assert_eq!(terminal_detail["idempotencyKey"], "start");
+    assert_eq!(terminal_detail["machineId"], machine.to_string());
+    assert_eq!(
+        terminal_detail["runtimeGenerationId"],
+        generation.to_string()
+    );
     socket.idle().await;
     let deliveries = gateway
         .request(
@@ -1492,6 +1537,195 @@ impl Drop for Callback {
 }
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; creates and drops its own database"]
+async fn v3_run_results_and_terminal_categories_survive_replay() {
+    let db = Database::new().await;
+    let mut gateway = Gateway::start(&db).await;
+    let (user, key, _) = gateway.user("Inline result").await;
+    assert_eq!(gateway.request(Method::PATCH, "/v1/me", &key,
+        Some(json!({"callbackUrl":"https://callback.example/events","webhookPayloadVersion":3}))).await.0, 200);
+    let (machine, installation, credential) = gateway.machine(&key).await;
+    let generation = Uuid::new_v4();
+    let mut socket = MachineSocket::connect(
+        &gateway,
+        machine,
+        installation,
+        &credential,
+        generation,
+        false,
+    )
+    .await;
+    let preview = base64::engine::general_purpose::STANDARD.encode(vec![b'x'; 1024 * 1024]);
+    for (index, outcome) in [
+        json!({"reason":"exited","exit_code":0,"signal":null}),
+        json!({"reason":"exited","exit_code":7,"signal":null}),
+        json!({"reason":"timed_out","exit_code":null,"signal":null}),
+        json!({"reason":"start_failed","message":"missing executable"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let idempotency = format!("run-{index}");
+        let context = json!({"receiver":"bash","routeKey":"route","sessionId":"session",
+            "operationId":format!("operation-{index}"),"submissionId":"submission",
+            "machineId":machine,"timeoutSeconds":30,"nested":{"keep":[true,null,5]}});
+        let request = json!({"operation":"execution.run","params":{"run_id":idempotency,
+            "command":{"type":"program","executable":"/private/secret-command"},
+            "max_output_bytes":1048576}});
+        let job = gateway
+            .job_with_context(
+                &key,
+                machine,
+                &idempotency,
+                Some(context.clone()),
+                request.clone(),
+            )
+            .await;
+        let replay = gateway.request(Method::POST, "/v1/jobs", &key,
+            Some(json!({"machineId":machine,"idempotencyKey":idempotency,"clientContext":context,"request":request}))).await;
+        assert_eq!(replay.1["id"], job.to_string());
+        let dispatched = socket.request().await;
+        assert_eq!(dispatched["params"]["max_output_bytes"], 1048576);
+        let result = json!({"run_id":idempotency,
+            "execution":{"command":{"type":"program","executable":"/private/secret-command"},
+                "result":outcome,"state":"finished"},
+            "output_file":{"artifact_id":Uuid::new_v4(),"path":"/machine/output/reference",
+                "size_bytes":2000000,"sha256":"abcd","complete":true,"expires_at":"2026-09-21T00:00:00Z"},
+            "output":[{"stream":"stdout","data_base64":if index == 0 { preview.as_str() } else { "eA==" }}],
+            "output_truncated":true});
+        socket.reply(&dispatched, result).await;
+        let detail = gateway.terminal(&key, job).await;
+        assert_eq!(detail["status"], "succeeded");
+        assert_eq!(detail["clientContext"], context);
+        assert_eq!(detail["idempotencyKey"], idempotency);
+        assert!(
+            detail["response"]["result"]["execution"]
+                .get("command")
+                .is_none()
+        );
+        let payload: Value =
+            sqlx::query_scalar("SELECT payload FROM webhook_deliveries WHERE job_id=$1")
+                .bind(job)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(payload["schemaVersion"], 3);
+        assert_eq!(payload["type"], "job.succeeded");
+        assert_eq!(payload["runtimeGenerationId"], generation.to_string());
+        assert_eq!(payload["idempotencyKey"], idempotency);
+        assert_eq!(payload["clientContext"], context);
+        assert_eq!(payload["response"], detail["response"]);
+        assert!(payload["error"].is_null());
+        assert!(payload.get("request").is_none());
+        assert_eq!(
+            payload["response"]["result"]["output_file"]["size_bytes"],
+            2000000
+        );
+        assert_eq!(
+            payload["response"]["result"]["execution"]["result"],
+            outcome
+        );
+        if index == 0 {
+            assert_eq!(
+                payload["response"]["result"]["output"][0]["data_base64"],
+                preview
+            );
+        }
+        let terminal_replay = gateway.request(Method::POST, "/v1/jobs", &key,
+            Some(json!({"machineId":machine,"idempotencyKey":idempotency,"clientContext":context,"request":request}))).await;
+        assert_eq!(terminal_replay.1, json!({"id":job,"status":"succeeded"}));
+        let changed_machine = gateway.request(Method::POST, "/v1/jobs", &key,
+            Some(json!({"machineId":Uuid::new_v4(),"idempotencyKey":idempotency,"clientContext":context,"request":request}))).await;
+        assert_eq!(changed_machine.1["error"]["code"], "idempotency_conflict");
+        if index == 0 {
+            let changed_context = gateway
+                .request(
+                    Method::POST,
+                    "/v1/jobs",
+                    &key,
+                    Some(json!({"machineId":machine,"idempotencyKey":idempotency,
+                    "clientContext":{"receiver":"different"},"request":request})),
+                )
+                .await;
+            assert_eq!(changed_context.1["error"]["code"], "idempotency_conflict");
+            let changed_request = gateway
+                .request(
+                    Method::POST,
+                    "/v1/jobs",
+                    &key,
+                    Some(json!({"machineId":machine,"idempotencyKey":idempotency,
+                    "clientContext":context,"request":{"operation":"runtime.info"}})),
+                )
+                .await;
+            assert_eq!(changed_request.1["error"]["code"], "idempotency_conflict");
+        }
+    }
+    socket.idle().await;
+
+    // Protocol failures keep a response; gateway failures and uncertain outcomes keep an error.
+    for (index, status) in ["protocol", "failed", "unknown"].into_iter().enumerate() {
+        let job = Uuid::new_v4();
+        let context = json!({"receiver":"bash","case":status});
+        sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash,client_context,status,runtime_generation_id) VALUES($1,$2,$3,$4,'fixture',$5,'dispatching',$6)")
+            .bind(job).bind(user).bind(machine).bind(format!("terminal-{index}"))
+            .bind(&context).bind(generation).execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO job_requests(job_id,request) VALUES($1,$2)")
+            .bind(job)
+            .bind(json!({"operation":"runtime.info"}))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        if status == "protocol" {
+            let response = serde_json::from_value(
+                json!({"protocol_version":process_execution_protocol::VERSION,
+                "request_id":job.to_string(),"generation_id":generation,"status":"error",
+                "error":{"code":"invalid_argument","message":"bad run"}}),
+            )
+            .unwrap();
+            jobs::response(&db.state(), machine, generation, job, response)
+                .await
+                .unwrap();
+        } else {
+            jobs::finish(&db.state(), job, status,
+                json!({"code":if status == "unknown" { "recovery_unavailable" } else { "dispatch_timeout" },
+                    "message":"fixture"})).await.unwrap();
+        }
+        let detail = gateway
+            .request(Method::GET, &format!("/v1/jobs/{job}"), &key, None)
+            .await
+            .1;
+        let payload: Value =
+            sqlx::query_scalar("SELECT payload FROM webhook_deliveries WHERE job_id=$1")
+                .bind(job)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(detail["clientContext"], context);
+        assert_eq!(payload["clientContext"], context);
+        assert_eq!(payload["response"], detail["response"]);
+        assert_eq!(payload["error"], detail["error"]);
+        if status == "protocol" {
+            assert_eq!(detail["status"], "failed");
+            assert_eq!(payload["response"]["status"], "error");
+            assert!(payload["error"].is_null());
+        } else {
+            assert_eq!(detail["status"], status);
+            assert!(payload["response"].is_null());
+            assert_eq!(
+                payload["error"]["code"],
+                if status == "unknown" {
+                    "recovery_unavailable"
+                } else {
+                    "dispatch_timeout"
+                }
+            );
+        }
+    }
+    drop(socket);
+    gateway.stop().await;
+}
+
+#[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL and openssl; uses a trusted local HTTPS callback"]
 async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
     use tower::ServiceExt;
@@ -1502,7 +1736,7 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
     let job = Uuid::new_v4();
     let secret = crypto::token("whsec_");
     let key = crypto::token("egw_");
-    sqlx::query("INSERT INTO users(id,name,callback_url,webhook_secret_encrypted) VALUES($1,'fixture',$2,$3)")
+    sqlx::query("INSERT INTO users(id,name,callback_url,webhook_secret_encrypted,webhook_payload_version) VALUES($1,'fixture',$2,$3,3)")
         .bind(user).bind(&callback.url).bind(crypto::encrypt(&[42;32], user, &secret).unwrap()).execute(&db.pool).await.unwrap();
     sqlx::query(
         "INSERT INTO user_api_keys(id,user_id,key_hash,key_prefix) VALUES($1,$2,$3,'fixture')",
@@ -1520,7 +1754,8 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
         .await
         .unwrap();
     let client_context = json!({"receiver":"tool-pi-bash-v1","reference":"failed-operation"});
-    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash,client_context) VALUES($1,$2,$3,'fixture','fixture',$4)").bind(job).bind(user).bind(machine).bind(&client_context).execute(&db.pool).await.unwrap();
+    let generation = Uuid::new_v4();
+    sqlx::query("INSERT INTO jobs(id,user_id,machine_id,idempotency_key,request_hash,client_context,status,runtime_generation_id) VALUES($1,$2,$3,'fixture','fixture',$4,'dispatching',$5)").bind(job).bind(user).bind(machine).bind(&client_context).bind(generation).execute(&db.pool).await.unwrap();
     sqlx::query("INSERT INTO job_requests(job_id,request) VALUES($1,$2)")
         .bind(job)
         .bind(json!({"operation":"runtime.info"}))
@@ -1543,14 +1778,24 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
         .timeout(Duration::from_secs(3))
         .build()
         .unwrap();
-    jobs::finish(
-        &state,
+    let run_response = json!({"protocol_version":process_execution_protocol::VERSION,
+        "request_id":job.to_string(),"generation_id":generation,"status":"ok",
+        "result":{"run_id":"fixture-run","execution":{"result":{"reason":"exited","exit_code":0,"signal":null}},
+            "output":[{"stream":"stdout","data_base64":"aGVsbG8="}],"output_truncated":true,
+            "output_file":{"artifact_id":Uuid::new_v4(),"path":"/machine/output/reference",
+                "size_bytes":100,"sha256":"abcd","complete":true,"expires_at":"2026-09-21T00:00:00Z"}}});
+    let mut tx = db.pool.begin().await.unwrap();
+    jobs::finish_tx(
+        &mut tx,
         job,
-        "failed",
-        json!({"code":"fixture","message":"fixture"}),
+        "succeeded",
+        Some(run_response.clone()),
+        None,
+        7,
     )
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let delivery: Uuid = sqlx::query_scalar("SELECT id FROM webhook_deliveries WHERE job_id=$1")
         .bind(job)
         .fetch_one(&db.pool)
@@ -1566,11 +1811,13 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
     assert_eq!(body["eventId"], delivery.to_string());
     assert_eq!(body["jobId"], job.to_string());
     assert_eq!(body["machineId"], machine.to_string());
-    assert_eq!(body["type"], "job.failed");
+    assert_eq!(body["type"], "job.succeeded");
     assert_eq!(body["clientContext"], client_context);
-    assert_eq!(body["error"]["code"], "fixture");
-    assert!(body["response"].is_null());
-    assert!(body.get("schemaVersion").is_none());
+    assert_eq!(body["schemaVersion"], 3);
+    assert_eq!(body["idempotencyKey"], "fixture");
+    assert_eq!(body["runtimeGenerationId"], generation.to_string());
+    assert!(body["error"].is_null());
+    assert_eq!(body["response"], run_response);
     assert_eq!(
         body.as_object()
             .unwrap()
@@ -1583,8 +1830,11 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
             "error",
             "eventId",
             "jobId",
+            "idempotencyKey",
             "machineId",
             "response",
+            "runtimeGenerationId",
+            "schemaVersion",
             "type"
         ])
     );
@@ -1635,6 +1885,25 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
         .await
         .unwrap();
     assert_eq!(status, "delivered");
+
+    // A fresh gateway process still has the full retained event for manual redelivery.
+    let mut restarted = db.state();
+    std::sync::Arc::make_mut(&mut restarted.config)
+        .webhook_origins
+        .insert(
+            url::Url::parse(&callback.url)
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+        );
+    restarted.http = Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&callback.certificate).unwrap())
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let state = restarted;
 
     let response = router(state.clone())
         .oneshot(
@@ -1698,7 +1967,7 @@ async fn webhook_signatures_retry_redelivery_and_lease_recovery() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(final_job, "failed");
+    assert_eq!(final_job, "succeeded");
     state.pool.close().await;
 }
 
