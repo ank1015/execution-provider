@@ -303,13 +303,13 @@ The terminal job transaction captures the user's callback URL and writes one imm
 event. Callback I/O happens later, outside database transactions.
 
 Version 2 events contain `schemaVersion`, `eventId`, `type`, `jobId`, `machineId`, and
-`completedAt`, plus the unchanged `clientContext` object when the submission supplied
-one. Consumers durably accept this wake-up event and retrieve the response or gateway
-error from the job endpoint. This avoids duplicating potentially large execution
-responses in the outbox and receiver inbox. Migrated users remain on the legacy version
-1 schema until they opt in; new users default to version 2. Client context behaves the
-same in both versions and is omitted when absent. Historical delivery payloads remain
-immutable.
+`completedAt`, plus the unchanged `clientContext` object when supplied. Version 3 also
+contains `idempotencyKey`, `runtimeGenerationId`, and explicit `response` and `error`
+fields with the retained terminal result. The gateway removes `execution.command` from
+stored execution results, while retaining outcome, bounded preview, and output-file
+metadata. V3 consumers can durably admit and process the signed event without fetching
+job detail. Migrated users remain on version 1 until they opt in; new users default
+to version 2. Historical delivery payloads remain immutable.
 
 The worker claims one eligible delivery with `FOR UPDATE SKIP LOCKED`, creates an attempt,
 and assigns a 60-second lease. It then decrypts the current user secret, signs the exact
@@ -318,7 +318,8 @@ lease token fences finalization so a stale worker cannot overwrite a newer attem
 
 Network failures and selected transient HTTP statuses retry with jittered exponential
 backoff. Each cycle allows up to eight attempts within 24 hours. Manual redelivery starts
-a new cycle on the same event and preserves all history. Webhook failure never changes
+a new cycle on the same event and preserves the full retained payload and all history.
+Webhook failure never changes
 the job result and never repeats execution work.
 
 The operator must explicitly allow callback origins through

@@ -189,7 +189,7 @@ Create a user:
 
 `callbackUrl` is required. Use an empty string to disable webhooks. A nonempty value
 must be HTTPS and cannot contain credentials or a fragment. `webhookPayloadVersion`
-may be 1 or 2 and defaults to 2. The response contains all three one-time secrets or
+may be 1, 2, or 3 and defaults to 2. The response contains all three one-time secrets or
 resources created by the request:
 
 ```json
@@ -435,8 +435,13 @@ the outcome.
 - `request`: the normalized operation or batch while retained, otherwise null.
 - `requestStatus`: `retained` or `expired`.
 - `requestExpiresAt`: the input cleanup deadline after completion.
-- `response`: the complete daemon response when one was received.
+- `response`: the stored daemon response when one was received.
 - `error`: a safe gateway error when the gateway produced the terminal result.
+- `clientContext`: the unchanged submission object when supplied; omitted otherwise.
+
+The gateway removes `execution.command` from stored execution results before saving
+them. The retained response and webhook therefore contain the execution outcome,
+bounded output preview, and output-file reference without repeating the command.
 
 `GET /v1/jobs/{jobId}/wait` accepts only `timeoutMs`, an integer from 1 through
 300000 that defaults to 300000. An already-terminal job returns immediately. Otherwise,
@@ -692,14 +697,40 @@ nonempty callback URL. Payload version 2 is lightweight and has this shape:
 Event types are `job.succeeded`, `job.failed`, and `job.unknown`. Version 2 does not
 embed the request, response, gateway error, credentials, or account data. After durably
 recording the event, retrieve the authoritative result from either job-detail endpoint.
+Version 3 carries the retained result inline:
+
+```json
+{
+  "schemaVersion": 3,
+  "eventId": "00000000-0000-0000-0000-000000000007",
+  "type": "job.succeeded",
+  "jobId": "00000000-0000-0000-0000-000000000004",
+  "machineId": "00000000-0000-0000-0000-000000000001",
+  "idempotencyKey": "run-42",
+  "runtimeGenerationId": "00000000-0000-0000-0000-000000000005",
+  "completedAt": "2026-01-01T00:00:00Z",
+  "clientContext": {"receiver": "bash", "routeKey": "session-42"},
+  "response": {"protocol_version": 4, "request_id": "00000000-0000-0000-0000-000000000004", "generation_id": "00000000-0000-0000-0000-000000000005", "status": "ok", "result": {"run_id": "run-42", "execution": {"result": {"reason": "exited", "exit_code": 0, "signal": null}}, "output": [], "output_truncated": false, "output_file": {"artifact_id": "00000000-0000-0000-0000-000000000008", "path": "/machine/local/output", "size_bytes": 0, "sha256": "...", "complete": true, "expires_at": "2026-01-02T00:00:00Z"}}},
+  "error": null
+}
+```
+
+`response` and `error` are always present, with explicit nulls. They match the stored
+job detail. `runtimeGenerationId` is null when the job failed before dispatch. A
+protocol error can make a job `failed` with a nonnull `response` and null `error`;
+a gateway failure uses a null `response` and nonnull `error`. `job.unknown` means the
+execution outcome is uncertain and must not be treated as a definitive failure.
+`execution.run` includes its bounded output preview, execution outcome, and
+machine-local output-file metadata; the full output file and submitted request are
+not embedded. Normal v3 delivery requires no result GET.
 When the submission includes `clientContext`, every terminal event includes the same
 object without interpreting or modifying its contents. When omitted from the
-submission, the event omits the field. This behavior applies to both payload versions.
+submission, the event omits the field. This behavior applies to all payload versions.
 
 Payload version 1 is retained for compatibility and omits `schemaVersion`; it adds
 `response` and `error` fields containing the terminal job outcome. Users migrated from
 an earlier release remain on version 1. Newly created users default to version 2. Set
-`webhookPayloadVersion` to 1 or 2 through either user patch endpoint to control future
+`webhookPayloadVersion` to 1, 2, or 3 through either user patch endpoint to control future
 events. Existing delivery payloads remain immutable, including during redelivery.
 
 The gateway does not emit a later event when a process started by a completed job exits.
@@ -724,13 +755,17 @@ timestamp + "." + eventId + "." + rawRequestBody
 ```
 
 Check timestamp freshness, confirm the body and header event IDs match, and deduplicate
-the event ID before returning any 2xx response. Delivery is at least once.
+the event ID before returning any 2xx response. Return 2xx only after durable admission.
+Delivery is at least once.
 
 The gateway retries network failures and HTTP `408`, `429`, `500`, `502`, `503`, and
 `504`. It makes at most eight attempts in a 24-hour cycle, uses exponential backoff from
 30 seconds to one hour with jitter, and honors a valid `Retry-After` as a minimum.
 Manual redelivery preserves the event ID, payload, destination, and attempt history. It
 does not rerun the job.
+The gateway keeps the complete payload in the outbox after successful delivery, so
+manual redelivery sends the original v3 result and context without reconstruction.
+The HTTP request timeout is ten seconds (five seconds for connection establishment).
 
 ## Health endpoints
 

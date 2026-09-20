@@ -174,6 +174,10 @@ ordinary connection loss do not revoke the machine.
   hidden immediately and cleaned in bounded batches.
 - Job responses, idempotency records, machine history, and webhook history have
   no automatic purge in this release. Capacity planning must include them.
+- Webhook delivery uses a ten-second HTTP timeout, retries transient failures up to
+  eight times within 24 hours, and supports manual redelivery of retained results.
+- Set `webhookPayloadVersion` to `3` with `PATCH /v1/me` (or the admin user patch)
+  only after the receiver is ready. New users continue to default to version 2.
 
 No automatic execution tracking, generic job cancellation, command replay,
 multi-machine batches, or sandbox lifecycle management is implemented.
