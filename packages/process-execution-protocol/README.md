@@ -7,6 +7,9 @@ It embeds no network transport and owns no processes independently of the suppli
 The [execution API reference](../../apps/process-execution/README.md#protocol-version-4)
 documents the single-operation requests and responses. Version 4 adds `execution.run`,
 `execution.terminate_run`, timed-out results, and complete machine-local output artifacts.
+`filesystem.write_file` also accepts an additive `mode: "overwrite"` without a
+precondition; omitted mode retains the required conditional precondition. The host
+advertises this extension through `runtime.filesystem.overwrite`.
 `runtime_config::RuntimeConfig` provides the common JSON configuration
 for an embedded core.
 

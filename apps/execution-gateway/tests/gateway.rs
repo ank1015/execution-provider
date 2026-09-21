@@ -1285,11 +1285,30 @@ async fn daemon_registers_and_recovers_jobs_after_gateway_restart() {
         .await;
     let write = gateway.terminal(&key, write).await;
     assert_eq!(write["status"], "succeeded", "{write}");
-    let expected_sha256 = write["response"]["result"]["sha256"]
+    assert_eq!(write["response"]["result"]["disposition"], "applied");
+    let overwrite = gateway
+        .job(
+            &key,
+            machine,
+            "file-overwrite",
+            json!({
+                "operation":"filesystem.write_file",
+                "params":{
+                    "mutation_id":"gateway-file-overwrite",
+                    "path":file,
+                    "data_base64":"AQID",
+                    "mode":"overwrite"
+                }
+            }),
+        )
+        .await;
+    let overwrite = gateway.terminal(&key, overwrite).await;
+    assert_eq!(overwrite["status"], "succeeded", "{overwrite}");
+    assert_eq!(overwrite["response"]["result"]["disposition"], "applied");
+    let expected_sha256 = overwrite["response"]["result"]["sha256"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(write["response"]["result"]["disposition"], "applied");
     let read = gateway
         .job(
             &key,
@@ -1300,7 +1319,7 @@ async fn daemon_registers_and_recovers_jobs_after_gateway_restart() {
         .await;
     let read = gateway.terminal(&key, read).await;
     assert_eq!(read["status"], "succeeded", "{read}");
-    assert_eq!(read["response"]["result"]["data_base64"], "AP8B");
+    assert_eq!(read["response"]["result"]["data_base64"], "AQID");
     assert_eq!(read["response"]["result"]["sha256"], expected_sha256);
     let remove = gateway
         .job(
@@ -1341,7 +1360,7 @@ async fn daemon_registers_and_recovers_jobs_after_gateway_restart() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 5);
+    assert_eq!(count, 6);
     // An actual batch completes while its daemon reconnects to the restarted gateway.
     let source = profile.path().join("child.rs");
     let program = profile

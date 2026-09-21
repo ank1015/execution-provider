@@ -166,7 +166,7 @@ can have a null response `request_id` when it cannot be recovered.
 | `execution.list` | `{state?, labels?, limit?, page_cursor?}` | `{executions, next_page_cursor}` |
 | `filesystem.get_metadata` | `{path, cwd?}` | File type, size, symlink, and modification metadata |
 | `filesystem.read_file` | `{path, cwd?, max_bytes?}` | Metadata, padded-base64 bytes, and SHA-256 |
-| `filesystem.write_file` | `{mutation_id, path, cwd?, data_base64, create_parent_directories?, precondition}` | Conditional atomic-replacement receipt |
+| `filesystem.write_file` | `{mutation_id, path, cwd?, data_base64, create_parent_directories?, mode?, precondition?}` | Conditional or overwrite atomic-replacement receipt |
 | `filesystem.remove_file` | `{mutation_id, path, cwd?, precondition}` | Conditional file-removal receipt |
 
 The `?` suffix in the table denotes an optional field, not part of its name.
@@ -254,11 +254,28 @@ are `finished` and `all`. Preserve the filters when following `next_page_cursor`
 Filesystem paths are absolute or resolve relative to `cwd`, which itself resolves against
 the configured runtime cwd. Reads are whole-file and fail rather than truncate when the
 requested/configured byte limit is exceeded. File bytes use standard padded base64. A
-write or remove precondition is either `{"type":"missing"}` or
-`{"type":"sha256","sha256":"64-lowercase-hex-characters"}`. Mutations affect regular
-files only; removal is never recursive. Reuse a `mutation_id` only with identical input.
-If the requested final state already exists after an uncertain response, the mutation
-returns `disposition: "already_applied"`.
+conditional write or remove precondition is either `{"type":"missing"}` or
+`{"type":"sha256","sha256":"64-lowercase-hex-characters"}`. The write mode defaults
+to `"conditional"` and requires that precondition, preserving existing requests.
+Use `"mode":"overwrite"` without a precondition to replace a file without reading
+its old hash. The new content must fit the configured write limit (5 MiB by default),
+even if the old file is larger. Both modes can create parent directories in the same
+operation with `create_parent_directories: true`.
+
+Overwrite follows the final symlink to its target, including a dangling link, and
+leaves the link in place. Conditional writes retain their existing behavior: they read
+through a symlink, then replace the link itself when a write is needed. A write stages
+the new file beside the destination and renames it into place. Readers see either the
+old or new file; other hard links retain the old inode and contents. If the destination
+already has the requested content and fits the read limit, no replacement occurs and
+the receipt says `already_applied`. The rename does not provide a power-loss durability
+guarantee or a compare-and-swap against processes outside the runtime.
+
+Mutations affect regular files only; removal is never recursive. Reuse a `mutation_id`
+only with the same path, bytes, directory option, and mode/precondition. The runtime
+retains the first result for that ID while its generation lives. After a restart, a
+matching final file can return `already_applied`; a large old file is replaced without
+first comparing its contents.
 
 ## Lifetime, retries, and shutdown
 

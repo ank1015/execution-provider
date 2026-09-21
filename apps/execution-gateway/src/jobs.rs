@@ -196,6 +196,11 @@ fn validate_operation(operation: &Operation) -> Result<()> {
     if matches!(operation, Operation::Shutdown) {
         return Err(Error::invalid("runtime.shutdown is unavailable remotely"));
     }
+    if let Operation::WriteFile(params) = operation {
+        params
+            .core_mode()
+            .map_err(|_| Error::invalid("invalid file write mode and precondition"))?;
+    }
     Ok(())
 }
 

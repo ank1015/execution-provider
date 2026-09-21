@@ -94,6 +94,7 @@ impl ProcessExecutionCore {
                 max_write_bytes: config.limits.max_file_write_bytes,
                 conditional_mutations: true,
                 atomic_replace: true,
+                overwrite: true,
             },
             shell_snapshot: ShellSnapshotCapabilities {
                 enabled: config.shell_snapshot.enabled,

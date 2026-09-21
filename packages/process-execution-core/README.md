@@ -192,17 +192,26 @@ rejects new starts without evicting active work.
 
 ## Filesystem operations
 
-The core also provides bounded whole-file metadata/read operations and conditional
-write/remove mutations for trusted callers. Relative paths resolve against the requested
-cwd and then the configured runtime cwd. Reads return binary data and SHA-256; protocol
+The core also provides bounded whole-file metadata/read operations, conditional and
+overwrite writes, and conditional removal for trusted callers. Relative paths resolve
+against the requested cwd and then the configured runtime cwd. Reads return binary data and SHA-256; protocol
 adapters choose the wire encoding. The default read and write limit is 5 MiB.
 
 Writes use a temporary file in the destination directory followed by atomic replacement.
-They can create missing parent directories. Mutations require either a missing-file or
-SHA-256 precondition, affect regular files only, and use a stable mutation ID. Identical
-retries return the retained receipt. A different request using the same ID conflicts.
-The core retains 4,096 mutation receipts by default, and also recognizes an already
-achieved final state after receipt loss or a runtime restart.
+They can create missing parent directories. Conditional writes and removals require either
+a missing-file or SHA-256 precondition. Overwrite writes require no old hash; only the new
+bytes must fit the write limit, so an old file larger than 5 MiB can be replaced.
+Overwrite follows a final symlink, including a dangling link, and leaves it in place;
+conditional writes retain their existing behavior of replacing the link after reading
+through it. A replacement detaches the destination from any other hard links, which keep
+the old contents. Matching content within the read limit is an `already_applied` no-op.
+Atomic replacement concerns reader visibility, not power-loss durability or external
+compare-and-swap.
+
+Mutations affect regular files only and use a stable mutation ID. Identical retries
+return the retained receipt; changing the mode or any other request input under the
+same ID conflicts. The core retains 4,096 mutation receipts by default, and can recognize
+an already achieved final state after receipt loss or a runtime restart.
 
 ## Platform behavior
 
