@@ -32,6 +32,15 @@ fn request_validation_preserves_protocol_semantics() {
     .unwrap();
     assert_eq!(filesystem["operation"], "filesystem.write_file");
     assert_eq!(filesystem["params"]["data_base64"], "AP8=");
+    assert!(filesystem["params"].get("mode").is_none());
+    let overwrite = jobs::normalize(json!({
+        "operation":"filesystem.write_file",
+        "params":{"mutation_id":"overwrite-1","path":"file.bin",
+            "data_base64":"AP8=","mode":"overwrite"}
+    }))
+    .unwrap();
+    assert_eq!(overwrite["params"]["mode"], "overwrite");
+    assert!(overwrite["params"].get("precondition").is_none());
     let run = jobs::normalize(json!({
         "operation":"execution.run",
         "params":{
@@ -66,6 +75,11 @@ fn request_validation_preserves_protocol_semantics() {
         json!({"accepted_error_codes":["unknown"],"operations":[{"request_id":"a","operation":"runtime.info"}]}),
         json!({"accepted_error_codes":["not_found"],"operation":"runtime.info"}),
         json!({"operations":[{"request_id":"cancel","operation":"execution.terminate_run","params":{"run_id":"run-1"}}]}),
+        json!({"operation":"filesystem.write_file","params":{
+            "mutation_id":"missing-precondition","path":"file.bin","data_base64":"AP8="}}),
+        json!({"operation":"filesystem.write_file","params":{
+            "mutation_id":"mixed","path":"file.bin","data_base64":"AP8=",
+            "mode":"overwrite","precondition":{"type":"missing"}}}),
     ] {
         assert!(jobs::normalize(invalid).is_err());
     }

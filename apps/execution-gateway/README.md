@@ -117,6 +117,13 @@ connection. No transaction is held while awaiting daemon results or sending call
 
 ## Current daemon compatibility
 
+`filesystem.write_file` overwrite mode is an additive version 4 extension. Deploy a
+gateway build containing the new shared protocol and install a compatible host-daemon
+build before submitting `"mode":"overwrite"` jobs to that machine. Check the machine's
+`runtime.filesystem.overwrite` capability first. Older builds continue to handle
+conditional writes; an overwrite request without a precondition is rejected by an
+older gateway or daemon rather than being treated as a conditional write.
+
 The daemon's `register` command exchanges the single-use registration token for a
 private machine credential. Its stable installation ID is created automatically:
 

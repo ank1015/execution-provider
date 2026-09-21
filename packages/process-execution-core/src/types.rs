@@ -380,4 +380,6 @@ pub struct FileSystemCapabilities {
     pub max_write_bytes: usize,
     pub conditional_mutations: bool,
     pub atomic_replace: bool,
+    #[serde(default)]
+    pub overwrite: bool,
 }

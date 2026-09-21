@@ -505,7 +505,7 @@ The remote API accepts every process-execution operation except `runtime.shutdow
 | `execution.list` | Optional state, labels, limit, and page cursor | Execution page |
 | `filesystem.get_metadata` | `path`, optional `cwd` | File metadata |
 | `filesystem.read_file` | `path`, optional `cwd`/`max_bytes` | Metadata, padded-base64 bytes, and SHA-256 |
-| `filesystem.write_file` | Stable `mutation_id`, path, padded-base64 bytes, precondition | Conditional atomic replacement receipt |
+| `filesystem.write_file` | Stable `mutation_id`, path, padded-base64 bytes, optional mode and conditional precondition | Conditional or overwrite atomic replacement receipt |
 | `filesystem.remove_file` | Stable `mutation_id`, path, precondition | Conditional file removal receipt |
 
 An execution handle contains both identities required to address a process:
@@ -589,9 +589,23 @@ batch item; it does not replace operation-level deduplication.
 
 Filesystem reads are whole-file and bounded by the host's advertised limit. Their SHA-256
 can be supplied as `{"type":"sha256","sha256":"..."}` to a later mutation; file creation
-uses `{"type":"missing"}`. A mutation returns `already_applied` when its desired final state
-already exists, allowing safe recovery after a lost response. Removal accepts files only
-and is never recursive.
+uses `{"type":"missing"}`. `filesystem.write_file` defaults to conditional mode and
+requires a precondition. For unconditional replacement, send `"mode":"overwrite"` and
+omit `precondition`; the new bytes must fit the host's write limit even when the old file
+exceeds its read limit. The host advertises support as `runtime.filesystem.overwrite`.
+
+```json
+{"operation":"filesystem.write_file","params":{"mutation_id":"write-42","path":"nested/file.txt","data_base64":"bmV3","create_parent_directories":true,"mode":"overwrite"}}
+```
+
+Overwrite follows the final symlink target, including dangling links; conditional writes
+retain their existing link-replacement behavior. The host stages bytes in the target
+directory and renames over the destination. Other hard links keep the old contents, and
+a matching readable file is left untouched with `disposition: "already_applied"`.
+The rename is atomic for visibility, not a power-loss durability or external
+compare-and-swap guarantee. Identical `mutation_id` retries return the retained result
+within one runtime generation; after a restart, only final-content convergence is
+available. Removal accepts files only and is never recursive.
 
 The optional top-level `expected_generation_id` rejects a submission if the live
 runtime generation has changed:

@@ -104,7 +104,39 @@ pub struct WriteFileParams {
     pub data_base64: String,
     #[serde(default)]
     pub create_parent_directories: bool,
-    pub precondition: core::FilePrecondition,
+    #[serde(default, skip_serializing_if = "is_conditional_write_mode")]
+    pub mode: WriteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<core::FilePrecondition>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode {
+    #[default]
+    Conditional,
+    Overwrite,
+}
+
+fn is_conditional_write_mode(mode: &WriteMode) -> bool {
+    *mode == WriteMode::Conditional
+}
+
+impl WriteFileParams {
+    pub fn core_mode(&self) -> core::Result<core::WriteFileMode> {
+        match (self.mode, &self.precondition) {
+            (WriteMode::Conditional, Some(precondition)) => {
+                Ok(core::WriteFileMode::Conditional(precondition.clone()))
+            }
+            (WriteMode::Conditional, None) => {
+                Err(invalid("conditional file write requires a precondition"))
+            }
+            (WriteMode::Overwrite, None) => Ok(core::WriteFileMode::Overwrite),
+            (WriteMode::Overwrite, Some(_)) => Err(invalid(
+                "overwrite file write must not include a precondition",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -387,6 +419,7 @@ async fn dispatch_operation(
             }))
         }
         Operation::WriteFile(params) => {
+            let mode = params.core_mode()?;
             let data = STANDARD
                 .decode(params.data_base64)
                 .map_err(|error| invalid(format!("invalid base64 file data: {error}")))?;
@@ -398,7 +431,7 @@ async fn dispatch_operation(
                         path: params.path,
                         data,
                         create_parent_directories: params.create_parent_directories,
-                        precondition: params.precondition,
+                        mode,
                     })
                     .await?,
             )

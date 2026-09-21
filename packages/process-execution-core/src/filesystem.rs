@@ -31,13 +31,20 @@ pub enum FilePrecondition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteFileMode {
+    Conditional(FilePrecondition),
+    Overwrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteFileRequest {
     pub mutation_id: String,
     pub cwd: Option<PathBuf>,
     pub path: PathBuf,
     pub data: Vec<u8>,
     pub create_parent_directories: bool,
-    pub precondition: FilePrecondition,
+    pub mode: WriteFileMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +101,7 @@ enum MutationFingerprint {
         path: PathBuf,
         data_sha256: String,
         create_parent_directories: bool,
-        precondition: FilePrecondition,
+        mode: WriteFileMode,
     },
     Remove {
         path: PathBuf,
@@ -140,13 +147,15 @@ impl ProcessExecutionCore {
                 "file contents exceed the configured write limit",
             ));
         }
-        validate_precondition(&request.precondition)?;
+        if let WriteFileMode::Conditional(precondition) = &request.mode {
+            validate_precondition(precondition)?;
+        }
         let path = self.resolve_file_path(request.cwd.as_deref(), &request.path)?;
         let fingerprint = MutationFingerprint::Write {
             path: path.clone(),
             data_sha256: sha256(&request.data),
             create_parent_directories: request.create_parent_directories,
-            precondition: request.precondition.clone(),
+            mode: request.mode.clone(),
         };
         let mut registry = self.0.file_mutations.lock().await;
         if let Some((stored_fingerprint, outcome)) = registry.entries.get(&request.mutation_id) {
@@ -167,7 +176,7 @@ impl ProcessExecutionCore {
                 path,
                 request.data,
                 request.create_parent_directories,
-                request.precondition,
+                request.mode,
                 limit,
             )
         })
@@ -256,11 +265,18 @@ fn write_file_at(
     path: PathBuf,
     data: Vec<u8>,
     create_parent_directories: bool,
-    precondition: FilePrecondition,
+    mode: WriteFileMode,
     read_limit: usize,
 ) -> Result<WriteFileReceipt> {
     let desired_sha256 = sha256(&data);
-    let existing = existing_hash(&path, read_limit)?;
+    let target = match &mode {
+        WriteFileMode::Conditional(_) => path.clone(),
+        WriteFileMode::Overwrite => follow_final_symlinks(&path)?,
+    };
+    let existing = match &mode {
+        WriteFileMode::Conditional(_) => existing_hash(&target, read_limit)?,
+        WriteFileMode::Overwrite => readable_existing_hash(&target, read_limit)?,
+    };
     if existing.as_deref() == Some(&desired_sha256) {
         return Ok(WriteFileReceipt {
             mutation_id,
@@ -270,18 +286,20 @@ fn write_file_at(
             disposition: MutationDisposition::AlreadyApplied,
         });
     }
-    check_precondition(existing.as_deref(), &precondition)?;
-    let parent = path
+    if let WriteFileMode::Conditional(precondition) = &mode {
+        check_precondition(existing.as_deref(), precondition)?;
+    }
+    let parent = target
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| Error::invalid("file path has no parent directory"))?;
     if create_parent_directories {
         fs::create_dir_all(parent).map_err(map_io)?;
     }
-    let permissions = fs::metadata(&path)
+    let permissions = fs::metadata(&target)
         .ok()
         .map(|metadata| metadata.permissions());
-    let file_name = path
+    let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
@@ -302,8 +320,10 @@ fn write_file_at(
         }
         // Narrow the race with writers outside this runtime. Mutations within a
         // runtime are serialized by the receipt registry lock.
-        check_precondition(existing_hash(&path, read_limit)?.as_deref(), &precondition)?;
-        atomic_replace(&temporary, &path).map_err(map_io)?;
+        if let WriteFileMode::Conditional(precondition) = &mode {
+            check_precondition(existing_hash(&target, read_limit)?.as_deref(), precondition)?;
+        }
+        atomic_replace(&temporary, &target).map_err(map_io)?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -317,6 +337,52 @@ fn write_file_at(
         bytes_written: data.len(),
         disposition: MutationDisposition::Applied,
     })
+}
+
+// Resolve the final component, including a dangling symlink. Parent components
+// continue to use the operating system's normal path resolution.
+fn follow_final_symlinks(path: &Path) -> Result<PathBuf> {
+    let mut target = path.to_path_buf();
+    for _ in 0..40 {
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(error) => return Err(map_io(error)),
+        };
+        if !metadata.file_type().is_symlink() {
+            return if metadata.is_file() {
+                Ok(target)
+            } else {
+                Err(Error::invalid("path is not a regular file"))
+            };
+        }
+        let link = fs::read_link(&target).map_err(map_io)?;
+        target = if link.is_absolute() {
+            link
+        } else {
+            target
+                .parent()
+                .ok_or_else(|| Error::invalid("file path has no parent directory"))?
+                .join(link)
+        };
+    }
+    Err(Error::invalid("too many symbolic links"))
+}
+
+// Overwrite bounds the new bytes, not the previous file. A large existing file
+// cannot be compared for the already-applied fast path, so it is replaced.
+fn readable_existing_hash(path: &Path, limit: usize) -> Result<Option<String>> {
+    match fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => Err(Error::invalid("path is not a regular file")),
+        Ok(metadata) if metadata.len() > limit as u64 => Ok(None),
+        Ok(_) => match read_file_at(path.to_path_buf(), limit) {
+            Ok(file) => Ok(Some(file.sha256)),
+            Err(error) if error.code == ErrorCode::ResourceLimit => Ok(None),
+            Err(error) => Err(error),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(map_io(error)),
+    }
 }
 
 fn remove_file_at(

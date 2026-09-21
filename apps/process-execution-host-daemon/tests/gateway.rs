@@ -260,6 +260,7 @@ async fn authenticated_execution_batches_and_local_administration_boundary() {
         hello["runtime"]["filesystem"]["conditional_mutations"],
         true
     );
+    assert_eq!(hello["runtime"]["filesystem"]["overwrite"], true);
     let batch = rpc(&mut socket, json!({"expected_generation_id": hello["runtime"]["generation_id"], "mode": "parallel", "operations": [
         {"request_id": "info", "operation": "runtime.info"},
         {"request_id": "list", "operation": "execution.list", "params": {}}
@@ -316,12 +317,27 @@ async fn authenticated_execution_batches_and_local_administration_boundary() {
     )
     .await;
     assert_eq!(read["result"]["data_base64"], STANDARD.encode([0, 255, 1]));
+    let overwritten = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.write_file","params":{
+            "mutation_id":"daemon-file-overwrite","path":"nested/file.bin",
+            "data_base64":STANDARD.encode([2, 3]),"mode":"overwrite"
+        }}),
+    )
+    .await;
+    assert_eq!(overwritten["result"]["disposition"], "applied");
+    let read = rpc(
+        &mut socket,
+        json!({"operation":"filesystem.read_file","params":{"path":"nested/file.bin"}}),
+    )
+    .await;
+    assert_eq!(read["result"]["data_base64"], STANDARD.encode([2, 3]));
     let metadata = rpc(
         &mut socket,
         json!({"operation":"filesystem.get_metadata","params":{"path":"nested/file.bin"}}),
     )
     .await;
-    assert_eq!(metadata["result"]["size"], 3);
+    assert_eq!(metadata["result"]["size"], 2);
     let removed = rpc(
         &mut socket,
         json!({"operation":"filesystem.remove_file","params":{

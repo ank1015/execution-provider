@@ -291,3 +291,41 @@ async fn filesystem_operations_round_trip_binary_data_and_stop_stale_batches() {
     );
     core.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn overwrite_mode_omits_precondition_and_rejects_mixed_contracts() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = ProcessExecutionCore::new(Config::new(directory.path())).unwrap();
+    let dispatcher = Dispatcher::local(core.clone(), version_info("test", "0"));
+    std::fs::write(directory.path().join("file.bin"), b"before").unwrap();
+    let request = json!({"operation":"filesystem.write_file","params":{
+        "mutation_id":"overwrite","path":"file.bin","data_base64":"YWZ0ZXI=",
+        "mode":"overwrite"
+    }});
+    let written = dispatch(&dispatcher, request.clone()).await;
+    assert_eq!(written["result"]["disposition"], "applied");
+    assert_eq!(
+        dispatch(&dispatcher, request).await["result"],
+        written["result"]
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("file.bin")).unwrap(),
+        b"after"
+    );
+
+    for params in [
+        json!({"mutation_id":"missing-precondition","path":"file.bin","data_base64":"eA=="}),
+        json!({"mutation_id":"mixed","path":"file.bin","data_base64":"eA==",
+            "mode":"overwrite","precondition":{"type":"missing"}}),
+    ] {
+        assert_eq!(
+            dispatch(
+                &dispatcher,
+                json!({"operation":"filesystem.write_file","params":params})
+            )
+            .await["error"]["code"],
+            "invalid_argument"
+        );
+    }
+    core.shutdown().await.unwrap();
+}
