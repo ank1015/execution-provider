@@ -382,4 +382,6 @@ pub struct FileSystemCapabilities {
     pub atomic_replace: bool,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    pub apply_patch_formats: Vec<String>,
 }

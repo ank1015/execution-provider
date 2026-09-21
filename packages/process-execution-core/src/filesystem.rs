@@ -10,6 +10,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod patch;
+pub use patch::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilePathRequest {
     pub cwd: Option<PathBuf>,
@@ -107,12 +110,16 @@ enum MutationFingerprint {
         path: PathBuf,
         precondition: FilePrecondition,
     },
+    Patch {
+        digest: String,
+    },
 }
 
 #[derive(Clone)]
 enum MutationOutcome {
     Write(Result<WriteFileReceipt>),
     Remove(Result<RemoveFileReceipt>),
+    Patch(PatchReceipt),
 }
 
 #[derive(Default)]
@@ -164,7 +171,9 @@ impl ProcessExecutionCore {
             }
             return match outcome {
                 MutationOutcome::Write(result) => result.clone(),
-                MutationOutcome::Remove(_) => Err(idempotency_conflict()),
+                MutationOutcome::Remove(_) | MutationOutcome::Patch(_) => {
+                    Err(idempotency_conflict())
+                }
             };
         }
         ensure_receipt_capacity(&registry, self.0.config.limits.max_file_mutation_receipts)?;
@@ -205,7 +214,9 @@ impl ProcessExecutionCore {
             }
             return match outcome {
                 MutationOutcome::Remove(result) => result.clone(),
-                MutationOutcome::Write(_) => Err(idempotency_conflict()),
+                MutationOutcome::Write(_) | MutationOutcome::Patch(_) => {
+                    Err(idempotency_conflict())
+                }
             };
         }
         ensure_receipt_capacity(&registry, self.0.config.limits.max_file_mutation_receipts)?;

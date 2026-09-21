@@ -7,7 +7,7 @@ An optional lightweight webhook can notify the application that the result is re
 
 This reference describes HTTP API version 1. For the system design and failure
 semantics, see [Architecture](architecture.md). The execution payload is shared with
-[`process-execution`](../../process-execution/README.md#protocol-version-4).
+[`process-execution`](../../process-execution/README.md#protocol-version-5).
 
 ## Base URL and authentication
 
@@ -456,7 +456,7 @@ A successful daemon response has this envelope:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 5,
   "request_id": "00000000-0000-0000-0000-000000000004",
   "generation_id": "00000000-0000-0000-0000-000000000005",
   "status": "ok",
@@ -507,6 +507,7 @@ The remote API accepts every process-execution operation except `runtime.shutdow
 | `filesystem.read_file` | `path`, optional `cwd`/`max_bytes` | Metadata, padded-base64 bytes, and SHA-256 |
 | `filesystem.write_file` | Stable `mutation_id`, path, padded-base64 bytes, optional mode and conditional precondition | Conditional or overwrite atomic replacement receipt |
 | `filesystem.remove_file` | Stable `mutation_id`, path, precondition | Conditional file removal receipt |
+| `filesystem.apply_patch` | Stable `mutation_id`, optional `cwd`, tagged `patch` | Codex or Pi-style text mutation receipt |
 
 An execution handle contains both identities required to address a process:
 
@@ -582,7 +583,7 @@ Use caller-stable retry identities for side-effecting operations:
 - `run_id` for `execution.run` and `execution.terminate_run`.
 - `input_id` for `execution.write_input`.
 - `operation_id` for `execution.interrupt`.
-- `mutation_id` for `filesystem.write_file` and `filesystem.remove_file`.
+- `mutation_id` for `filesystem.write_file`, `filesystem.remove_file`, and `filesystem.apply_patch`.
 
 Reuse one of these IDs only with the same action and payload. A request ID correlates a
 batch item; it does not replace operation-level deduplication.
@@ -606,6 +607,84 @@ The rename is atomic for visibility, not a power-loss durability or external
 compare-and-swap guarantee. Identical `mutation_id` retries return the retained result
 within one runtime generation; after a restart, only final-content convergence is
 available. Removal accepts files only and is never recursive.
+
+### Applying text patches
+
+Protocol version 5 advertises `runtime.filesystem.apply_patch_formats` containing
+`codex` and `text_replacements`. Older daemons cannot accept this operation and are
+incompatible with the version-5 gateway handshake; no read/write-job downgrade occurs.
+Submit a single ordinary job with either of these operation payloads:
+
+```json
+{"operation":"filesystem.apply_patch","params":{"mutation_id":"edit-42","cwd":"/workspace/project","patch":{"format":"codex","text":"*** Begin Patch\n*** Update File: src/config.ts\n@@\n-const enabled = false;\n+const enabled = true;\n*** End Patch"}}}
+```
+
+```json
+{"operation":"filesystem.apply_patch","params":{"mutation_id":"edit-43","cwd":"/workspace/project","patch":{"format":"text_replacements","files":[{"path":"src/config.ts","edits":[{"oldText":"enabled = false","newText":"enabled = true"}]}]}}}
+```
+
+`cwd` and paths follow the other native filesystem operations, including absolute
+paths. Embedded Codex environment/workdir routing directives are rejected. Codex
+supports ordered add, update, delete, move-with-update, multiple sections and hunks,
+`@@` anchors, EOF markers, and insertions. Add and move can replace existing files;
+updates use ordered exact, trailing-whitespace, whole-line-whitespace, then Unicode
+punctuation matching. Trailing empty context lines can represent a final-newline
+sentinel; pure insertions append at EOF even when an `@@` anchor is present.
+Repeated sections see earlier planned contents. Updates use
+Codex's historical LF reconstruction (unchanged CRLF lines can retain their CR bytes);
+add lines terminate with LF. Ordinary unified-diff input is not accepted.
+
+Text replacements require existing UTF-8 files, nonempty `oldText`, and a unique
+nonoverlapping match per edit against the original LF-normalized text of that file.
+Edits may be unordered, mid-line, multiline, or delete matched text with an empty
+`newText`. A no-change result is rejected. The leading UTF-8 BOM is kept, and the
+first existing CRLF style is restored on output. Unlike Pi, this implementation does
+not use Pi's NFKC/Unicode/whitespace fuzzy replacement fallback or preserve mixed
+line endings within changed files; exact LF-normalized matching is intentional.
+
+The planner bounds each original read and each result to 5 MiB, Codex patch text to
+2 MiB, serialized parameters to 4 MiB, 32 sections/files, 256 edits/hunks, 20 MiB
+of aggregate original plus planned result bytes, and 30 million matching steps.
+Paths are at most 4096 bytes. Display diff generation is omitted for sections
+whose before-plus-after content exceeds 256 KiB; otherwise it stops at 64 KiB and sets
+`diff_truncated`; serialized receipts are capped at 1,700,000 bytes by omitting
+the optional diff if JSON escaping would exceed that bound. They do not include
+full file contents. The diff is a coarse
+unified display hunk, not necessarily a minimal patch or byte-exact representation
+of unterminated lines. `first_changed_line` is one-based in the resulting file.
+
+```json
+{"mutation_id":"edit-43","status":"applied","changes_exact":true,"changes":[{"kind":"update","path":"/workspace/project/src/config.ts","before_sha256":"...","after_sha256":"...","bytes_before":23,"bytes_after":22,"first_changed_line":1}],"diff":"--- a/...\n+++ b/...\n@@ ...\n","diff_truncated":false,"error":null}
+```
+
+`status` is `applied` only when every section commits. Predictable planning failures
+produce `rejected` with no requested file changes; commit-stage failures produce
+`partial` if anything changed or might have changed. `changes` records committed
+steps in order; a move whose destination write succeeded but source removal failed
+reports the destination write separately. Moves also record the overwritten
+destination's prior hash and byte count as `destination_before_sha256` and
+`destination_bytes_before`. `changes_exact: false` means a failing
+filesystem call may have changed more than the known records. `error` has `code`,
+`message`, optional zero-based `section`, and optional zero-based `edit`.
+The protocol response remains `status: "ok"` with this structured result, while the
+gateway job is `succeeded` only for `applied`, and `failed` for `rejected` or `partial`.
+Batch items retain the structured receipt and a rejected/partial item fails a
+sequential batch. A lost response or expired recovery is instead a gateway `unknown`
+outcome; do not infer rejection or blindly retry with a new mutation ID.
+
+The mutation ID fingerprints the entire input and returns its retained receipt for
+same-ID/same-input replay, even if other writes have subsequently changed the files;
+different input with the same ID conflicts. Duplicate calls are serialized with
+other native file mutations within this runtime. Receipts are in-memory and limited
+by the configured capacity (default 4096); they do not survive a runtime restart.
+This is not a multi-file atomic transaction. Each write uses a staged atomic replace
+with a planned-content or missing-file precondition rechecked immediately before
+replacement, and preserves existing permissions. Parent directories for adds/move destinations
+are created at commit and can remain after a later failure. Content updates follow
+symlink targets without replacing the link; delete and move *sources* reject final
+symlinks. Symlink aliases in one patch are rejected. External processes can still
+race the precondition checks and atomic replacements; hard-link aliasing is not
+tracked. Unsupported file types, oversized reads, and invalid UTF-8 are errors.
 
 The optional top-level `expected_generation_id` rejects a submission if the live
 runtime generation has changed:
@@ -724,7 +803,7 @@ Version 3 carries the retained result inline:
   "runtimeGenerationId": "00000000-0000-0000-0000-000000000005",
   "completedAt": "2026-01-01T00:00:00Z",
   "clientContext": {"receiver": "bash", "routeKey": "session-42"},
-  "response": {"protocol_version": 4, "request_id": "00000000-0000-0000-0000-000000000004", "generation_id": "00000000-0000-0000-0000-000000000005", "status": "ok", "result": {"run_id": "run-42", "execution": {"result": {"reason": "exited", "exit_code": 0, "signal": null}}, "output": [], "output_truncated": false, "output_file": {"artifact_id": "00000000-0000-0000-0000-000000000008", "path": "/machine/local/output", "size_bytes": 0, "sha256": "...", "complete": true, "expires_at": "2026-01-02T00:00:00Z"}}},
+  "response": {"protocol_version": 5, "request_id": "00000000-0000-0000-0000-000000000004", "generation_id": "00000000-0000-0000-0000-000000000005", "status": "ok", "result": {"run_id": "run-42", "execution": {"result": {"reason": "exited", "exit_code": 0, "signal": null}}, "output": [], "output_truncated": false, "output_file": {"artifact_id": "00000000-0000-0000-0000-000000000008", "path": "/machine/local/output", "size_bytes": 0, "sha256": "...", "complete": true, "expires_at": "2026-01-02T00:00:00Z"}}},
   "error": null
 }
 ```

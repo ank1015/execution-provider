@@ -117,7 +117,8 @@ connection. No transaction is held while awaiting daemon results or sending call
 
 ## Current daemon compatibility
 
-`filesystem.write_file` overwrite mode is an additive version 4 extension. Deploy a
+`filesystem.write_file` overwrite mode was added in version 4; `filesystem.apply_patch`
+requires version 5. Deploy a
 gateway build containing the new shared protocol and install a compatible host-daemon
 build before submitting `"mode":"overwrite"` jobs to that machine. Check the machine's
 `runtime.filesystem.overwrite` capability first. Older builds continue to handle

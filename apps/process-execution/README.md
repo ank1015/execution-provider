@@ -47,7 +47,7 @@ In another terminal:
 
 ```sh
 process-execution health --endpoint "$HOME/.process-execution/runtime.sock"
-printf '%s\n' '{"protocol_version":4,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
+printf '%s\n' '{"protocol_version":5,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"program","executable":"echo","args":["hello"]},"wait_ms":1000}}' |
   process-execution rpc --endpoint "$HOME/.process-execution/runtime.sock"
 ```
 
@@ -61,7 +61,7 @@ In another PowerShell terminal:
 
 ```powershell
 process-execution.exe health --endpoint '\\.\pipe\process-execution'
-'{"protocol_version":4,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
+'{"protocol_version":5,"request_id":"request-1","operation":"execution.start","params":{"start_id":"hello-1","command":{"type":"shell","script":"echo hello"},"wait_ms":1000}}' |
   process-execution.exe rpc --endpoint '\\.\pipe\process-execution'
 ```
 
@@ -105,7 +105,7 @@ and exits with code 1. Local parsing, transport, or timeout errors print a diagn
 to stderr and exit with code 1; CLI usage errors exit with code 2. A managed command's
 nonzero exit code is an execution result, not an RPC failure.
 
-## Protocol version 4
+## Protocol version 5
 
 The shared [process-execution-protocol](../../packages/process-execution-protocol/README.md)
 package owns request/response types and dispatch. Single-operation requests remain
@@ -118,7 +118,7 @@ Every request has this envelope:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 5,
   "request_id": "unique-correlation-id",
   "expected_generation_id": "UUID-from-health",
   "operation": "execution.get",
@@ -137,7 +137,7 @@ Successful responses have `status: "ok"` and `result`:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 5,
   "request_id": "unique-correlation-id",
   "generation_id": "supervisor-UUID",
   "status": "ok",
@@ -294,7 +294,7 @@ flags returned by `health` and terminate when appropriate.
 process cleanup, and releases the endpoint. For example, submit this through `rpc`:
 
 ```json
-{"protocol_version":4,"request_id":"shutdown-1","operation":"runtime.shutdown"}
+{"protocol_version":5,"request_id":"shutdown-1","operation":"runtime.shutdown"}
 ```
 
 Abruptly killing the supervisor cannot run graceful shutdown. Output, retry records,

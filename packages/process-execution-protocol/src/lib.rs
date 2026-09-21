@@ -14,7 +14,7 @@ pub mod runtime_config;
 pub use batch::*;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,6 +81,8 @@ pub enum Operation {
     WriteFile(WriteFileParams),
     #[serde(rename = "filesystem.remove_file")]
     RemoveFile(RemoveFileParams),
+    #[serde(rename = "filesystem.apply_patch")]
+    ApplyPatch(core::ApplyPatchRequest),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -446,6 +448,7 @@ async fn dispatch_operation(
                 })
                 .await?,
         ),
+        Operation::ApplyPatch(params) => value(runtime.apply_patch(params).await?),
     }
 }
 

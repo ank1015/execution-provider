@@ -1,6 +1,6 @@
 # process-execution-protocol
 
-Shared version 4 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
+Shared version 5 execution/filesystem RPC types, dispatch, JSON byte/cursor encoding, and
 batching. Both `process-execution` and `process-execution-host-daemon` use this crate.
 It embeds no network transport and owns no processes independently of the supplied core.
 
@@ -31,7 +31,7 @@ Send `operations` instead of `operation`/`params`:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 5,
   "request_id": "batch-1",
   "mode": "parallel",
   "accepted_error_codes": ["not_found"],
@@ -98,7 +98,7 @@ must still be considered before pausing it.
 
 ## Gateway transport contract
 
-`gateway::{HostMessage, GatewayMessage}` defines the version 4 handshake:
+`gateway::{HostMessage, GatewayMessage}` defines the version 5 handshake:
 
 1. The daemon connects to `wss://GATEWAY/BASE/v1/machines/MACHINE_ID/connect`, authenticating
    with an `Authorization: Bearer ...` header. It sends a `hello` containing protocol
