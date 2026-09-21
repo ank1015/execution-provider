@@ -8,6 +8,7 @@ description = "Local process supervision with pipes, terminals, and replayable o
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "net"] }
 tokio-util = { version = "0.7", features = ["rt", "io-util"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 which = "8"

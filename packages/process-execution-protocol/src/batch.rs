@@ -122,7 +122,9 @@ impl Request {
 impl Response {
     /// A valid batch envelope can contain failed or skipped operations.
     pub fn succeeded(&self) -> bool {
-        matches!(&self.outcome, Outcome::Ok { result } if result.get("succeeded") != Some(&Value::Bool(false)))
+        matches!(&self.outcome, Outcome::Ok { result }
+            if result.get("succeeded") != Some(&Value::Bool(false))
+            && !matches!(result.get("status").and_then(Value::as_str), Some("rejected" | "partial")))
     }
 }
 
@@ -265,7 +267,10 @@ impl Dispatcher {
 
 fn outcome_succeeded(outcome: &OperationOutcome, accepted_error_codes: &[core::ErrorCode]) -> bool {
     match outcome {
-        OperationOutcome::Ok { .. } => true,
+        OperationOutcome::Ok { result } => !matches!(
+            result.get("status").and_then(Value::as_str),
+            Some("rejected" | "partial")
+        ),
         OperationOutcome::Error { error } => accepted_error_codes.contains(&error.code),
         OperationOutcome::Skipped { .. } => false,
     }

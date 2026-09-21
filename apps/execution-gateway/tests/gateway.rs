@@ -1557,6 +1557,67 @@ impl Drop for Callback {
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; creates and drops its own database"]
+async fn patch_receipts_survive_job_persistence_and_inline_callback() {
+    let db = Database::new().await;
+    let mut gateway = Gateway::start(&db).await;
+    let (_, key, _) = gateway.user("Patch receipts").await;
+    assert_eq!(
+        gateway
+            .request(
+                Method::PATCH,
+                "/v1/me",
+                &key,
+                Some(json!({"webhookPayloadVersion":3}))
+            )
+            .await
+            .0,
+        200
+    );
+    let (machine, installation, credential) = gateway.machine(&key).await;
+    let generation = Uuid::new_v4();
+    let mut socket = MachineSocket::connect(
+        &gateway,
+        machine,
+        installation,
+        &credential,
+        generation,
+        false,
+    )
+    .await;
+    for status in ["rejected", "partial"] {
+        let operation = json!({"operation":"filesystem.apply_patch","params":{
+            "mutation_id":format!("patch-{status}"),"patch":{"format":"text_replacements",
+                "files":[{"path":"a.txt","edits":[{"oldText":"old","newText":"new"}]}]}}});
+        let job = gateway.job(&key, machine, status, operation).await;
+        let dispatched = socket.request().await;
+        assert_eq!(dispatched["operation"], "filesystem.apply_patch");
+        let receipt = json!({"mutation_id":format!("patch-{status}"),"status":status,
+            "changes_exact":status == "rejected", "changes":if status == "partial" { json!([{
+                "kind":"update","path":"/machine/a.txt","destination_path":null,
+                "before_sha256":"old","after_sha256":"new","bytes_before":3,
+                "bytes_after":3,"first_changed_line":1}]) } else { json!([]) },
+            "diff":"", "diff_truncated":false,
+            "error":{"code":"invalid_argument","message":"test failure","section":0,"edit":0}});
+        socket.reply(&dispatched, receipt.clone()).await;
+        let detail = gateway.terminal(&key, job).await;
+        assert_eq!(detail["status"], "failed");
+        assert_eq!(detail["response"]["result"], receipt);
+        let payload: Value =
+            sqlx::query_scalar("SELECT payload FROM webhook_deliveries WHERE job_id=$1")
+                .bind(job)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(payload["type"], "job.failed");
+        assert_eq!(payload["response"], detail["response"]);
+        assert!(payload["error"].is_null());
+    }
+    drop(socket);
+    gateway.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; creates and drops its own database"]
 async fn v3_run_results_and_terminal_categories_survive_replay() {
     let db = Database::new().await;
     let mut gateway = Gateway::start(&db).await;

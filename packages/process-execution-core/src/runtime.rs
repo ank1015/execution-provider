@@ -95,6 +95,7 @@ impl ProcessExecutionCore {
                 conditional_mutations: true,
                 atomic_replace: true,
                 overwrite: true,
+                apply_patch_formats: vec!["codex".into(), "text_replacements".into()],
             },
             shell_snapshot: ShellSnapshotCapabilities {
                 enabled: config.shell_snapshot.enabled,

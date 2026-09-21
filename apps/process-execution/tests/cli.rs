@@ -13,6 +13,36 @@ use uuid::Uuid;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_process-execution");
 
+#[tokio::test]
+async fn rpc_apply_patch_plans_commits_and_replays_in_one_job() {
+    let server = Server::start().await;
+    std::fs::write(server.directory.path().join("edit.txt"), "before\n").unwrap();
+    let request = server.request(
+        "filesystem.apply_patch",
+        json!({
+            "mutation_id": "cli-patch", "patch": {"format":"text_replacements", "files":[
+                {"path":"edit.txt", "edits":[{"oldText":"before","newText":"after"}]}
+            ]}
+        }),
+    );
+    let first = server.ok(&request).await;
+    assert_eq!(first["status"], "applied");
+    assert_eq!(first["changes"][0]["kind"], "update");
+    std::fs::write(server.directory.path().join("edit.txt"), "subsequent\n").unwrap();
+    assert_eq!(server.ok(&request).await, first);
+    assert_eq!(
+        std::fs::read_to_string(server.directory.path().join("edit.txt")).unwrap(),
+        "subsequent\n"
+    );
+    let info = server
+        .ok(&server.request("runtime.info", Value::Null))
+        .await;
+    assert_eq!(
+        info["runtime"]["filesystem"]["apply_patch_formats"],
+        json!(["codex", "text_replacements"])
+    );
+}
+
 fn fixture() -> &'static PathBuf {
     static FIXTURE: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
     &FIXTURE
